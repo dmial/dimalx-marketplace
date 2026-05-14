@@ -1,0 +1,12 @@
+{
+  "name": "missing-manual-creator",
+  "version": "0.1.0",
+  "description": "Generates learning materials (tutorials, methodology guides, study notes) following the Missing Manual principles.",
+  "author": {
+    "name": "Dmitry Alekseev",
+    "email": "dimalexeev@gmail.com"
+  },
+  "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/missing-manual-creator",
+  "repository": "https://github.com/dmial/dimalx-marketplace",
+  "license": "MIT"
+}

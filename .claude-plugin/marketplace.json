@@ -1,0 +1,16 @@
+{
+  "name": "dimalx-marketplace",
+  "owner": {
+    "name": "Dmitry Alekseev",
+    "email": "dimalexeev@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "missing-manual-creator",
+      "source": "./plugins/missing-manual-creator",
+      "description": "Generates learning materials (tutorials, methodology guides, study notes, cheat sheets) following the Missing Manual principles: pyramid structure, term proximity, contextual depth, and laconic practicality.",
+      "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/missing-manual-creator",
+      "license": "MIT"
+    }
+  ]
+}
