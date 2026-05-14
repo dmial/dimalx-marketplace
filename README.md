@@ -1,6 +1,6 @@
 # dimalx-marketplace
 
-Claude Code plugin marketplace by Dmitry Alekseev.
+Claude Code plugin marketplace by Dmitri Alekseev.
 
 ## Установка маркетплейса
 
@@ -29,16 +29,6 @@ Claude Code plugin marketplace by Dmitry Alekseev.
 ```
 
 Подробнее: [plugins/missing-manual-creator](plugins/missing-manual-creator/skills/missing-manual-creator/SKILL.md)
-
-## Структура репозитория
-
-```
-.claude-plugin/marketplace.json   — манифест маркетплейса
-plugins/
-  <plugin-name>/
-    .claude-plugin/plugin.json    — манифест плагина
-    skills/<skill-name>/SKILL.md  — описание скилла
-```
 
 ## Лицензия
 
