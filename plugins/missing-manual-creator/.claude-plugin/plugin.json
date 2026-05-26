@@ -1,6 +1,6 @@
 {
   "name": "missing-manual-creator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Generates learning materials (tutorials, methodology guides, study notes) following the Missing Manual principles.",
   "author": {
     "name": "Dmitry Alekseev",
