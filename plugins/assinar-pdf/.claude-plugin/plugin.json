@@ -1,0 +1,12 @@
+{
+  "name": "assinar-pdf",
+  "version": "0.1.0",
+  "description": "Stamps a stored handwritten signature onto a PDF, finding the signature block automatically and rendering a preview crop for visual check.",
+  "author": {
+    "name": "Dmitry Alekseev",
+    "email": "dimalexeev@gmail.com"
+  },
+  "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/assinar-pdf",
+  "repository": "https://github.com/dmial/dimalx-marketplace",
+  "license": "MIT"
+}
