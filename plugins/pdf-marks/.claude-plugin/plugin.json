@@ -1,0 +1,12 @@
+{
+  "name": "pdf-marks",
+  "version": "0.2.0",
+  "description": "Puts the marks a paper document carries onto a PDF: a stored handwritten signature and a company seal, both anchored to the signature block automatically, with a preview crop for visual check.",
+  "author": {
+    "name": "Dmitry Alekseev",
+    "email": "dimalexeev@gmail.com"
+  },
+  "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/pdf-marks",
+  "repository": "https://github.com/dmial/dimalx-marketplace",
+  "license": "MIT"
+}

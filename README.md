@@ -30,28 +30,30 @@ Claude Code plugin marketplace by Dmitri Alekseev.
 
 Подробнее: [plugins/missing-manual-creator](plugins/missing-manual-creator/skills/missing-manual-creator/SKILL.md)
 
-### assinar-pdf
+### pdf-marks
 
-Ставит сохранённую рукописную подпись (PNG) в PDF. Сам находит блок подписи — строку имени вида `(Имя Фамилия)` и линию над ней — сажает штамп и рендерит PNG-кроп области для визуальной проверки. Координаты руками указывать не надо.
+Ставит в PDF то, что на бумаге ставят рукой: подпись и печать компании. Два скилла в одном плагине, оба сами находят блок подписи — строку имени вида `(Имя Фамилия)` и линию над ней — и рендерят PNG-кроп области для визуальной проверки. Координаты руками указывать не надо.
 
-Срабатывает на фразы вроде «поставь подпись», «подпиши PDF», «sign this PDF», «assinar PDF».
+- **sign-pdf** — рукописная подпись на линию. Фразы: «поставь подпись», «подпиши PDF», «sign this PDF».
+- **stamp-pdf** — круглая печать внахлёст на подпись, с наклоном и полупрозрачностью. Умеет вытащить печать из фотографии оттиска на бумаге. Фразы: «поставь печать», «проштампуй», «add company stamp».
 
 Установка:
 
 ```
-/plugin install assinar-pdf@dimalx-marketplace
-pip3 install pymupdf
+/plugin install pdf-marks@dimalx-marketplace
+pip3 install pymupdf pillow numpy
 ```
 
-Подписи хранятся в папке пользователя — `~/Documents/Signatures/` (или `$SIGNATURES_DIR`), **не внутри плагина**. Добавить свою:
+Подписи и печати хранятся в папках пользователя — `~/Documents/Signatures/` и `~/Documents/Stamps/` (или `$SIGNATURES_DIR` / `$STAMPS_DIR`), **не внутри плагина**: печать компании в публичном репозитории — готовый к подделке актив. Добавить свою:
 
 ```
-python3 assinar.py --registar ~/Downloads/scan.png -p ana
+python3 sign.py --register ~/Downloads/scan.png -p ana
+python3 prep.py ~/Downloads/IMG_1234.HEIC ~/Documents/Stamps/acme.png --rotate 90
 ```
 
-Это визуальный штамп, а не квалифицированная электронная подпись.
+Это визуальный оттиск, а не квалифицированная электронная подпись.
 
-Подробнее: [plugins/assinar-pdf](plugins/assinar-pdf/skills/assinar-pdf/SKILL.md)
+Подробнее: [sign-pdf](plugins/pdf-marks/skills/sign-pdf/SKILL.md), [stamp-pdf](plugins/pdf-marks/skills/stamp-pdf/SKILL.md)
 
 ## Лицензия
 

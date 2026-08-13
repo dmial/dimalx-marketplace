@@ -13,10 +13,10 @@
       "license": "MIT"
     },
     {
-      "name": "assinar-pdf",
-      "source": "./plugins/assinar-pdf",
-      "description": "Stamps a stored handwritten signature onto a PDF, finding the signature block automatically and rendering a preview crop for visual check.",
-      "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/assinar-pdf",
+      "name": "pdf-marks",
+      "source": "./plugins/pdf-marks",
+      "description": "Puts the marks a paper document carries onto a PDF: a stored handwritten signature and a company seal, both anchored to the signature block automatically, with a preview crop for visual check.",
+      "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/pdf-marks",
       "license": "MIT"
     }
   ]
