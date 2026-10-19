@@ -5,7 +5,8 @@ The final text is reader A's transcription with exactly the edits the arbiter de
 this script, and then the reviewer's corrections: every character outside those places stays as
 reader A wrote it. Pages with missing or invalid decisions or corrections are reported, and their
 document is not written. A written document goes to documents/ as <name>.md, and its scan moves
-there from the inbox, so the two lie side by side.
+there from the inbox, so the two lie side by side. The review data also carries what the readers
+and the arbiter noted about each page.
 
 Usage: python3 build.py [DOC ...]   (from the project folder)
 """
@@ -29,6 +30,7 @@ from common import (
     MANIFEST_PATH,
     ROOT,
     distinctive,
+    file_lock,
     in_ranges,
     load_config,
     load_json,
@@ -36,7 +38,7 @@ from common import (
     load_ocr,
     load_text,
     locate,
-    neighbour_norms,
+    neighbours,
     nfc,
     page_paths,
     rel,
@@ -71,7 +73,7 @@ NUMBER_STATUS_BY_SEGMENT = {
     "undecided": "attention",
     "human": "human",
 }
-# Statuses of medical numbers that still need a human look.
+# Statuses of content numbers (not service information) that still need a human look.
 NEEDS_LOOK = ("attention", "resolved_unconfirmed", "unconfirmed")
 
 
@@ -125,6 +127,22 @@ def uncertain(guess: str) -> str:
     if guess.startswith("[") and guess.endswith("]") and guess.count("[") == 1:
         return "[?" + guess[1:]
     return f"[?{guess}]"
+
+
+def inside_unsure(text: str, start: int, end: int) -> bool:
+    """True if text[start:end] lies inside an uncertainty mark, as the "4" of "…710[?4]"."""
+    opening = text.rfind("[", 0, start)
+    if opening < 0 or not text.startswith("[?", opening) or any(ch in text[opening:start] for ch in "]\n"):
+        return False
+    closing = text.find("]", end)
+    return closing >= 0 and not any(ch in text[end:closing] for ch in "[\n")
+
+
+def unmarked(reading: str) -> str:
+    """A reading without its own uncertainty mark: "[?4]" -> "4"."""
+    if reading.startswith("[?") and reading.endswith("]") and reading.count("[") == 1:
+        return reading[2:-1]
+    return reading
 
 
 def valid_region(region: object) -> list[float] | None:
@@ -186,6 +204,8 @@ def plan_edits(a_text: str, compare: dict, decisions: dict[str, dict]) -> tuple[
         s, e = item["edit"]["a_span"]
         original = a_text[s:e]
         lead, trail = whitespace_frame(original if s < e else item["edit"]["b_text"])
+        # A number checked inside a mark that already says "not sure" ([?4]) gets no second mark.
+        in_mark = s < e and inside_unsure(a_text, s, e)
         if verdict == "A":
             edits.append(Edit(s, e, original, "resolved", item["id"], region))
         elif verdict == "confirmed":
@@ -196,10 +216,11 @@ def plan_edits(a_text: str, compare: dict, decisions: dict[str, dict]) -> tuple[
             if not text:
                 problems.append(f"{item['id']}: решение «own» без текста")
                 continue
-            edits.append(Edit(s, e, lead + text + trail, "own", item["id"], region))
+            edits.append(Edit(s, e, lead + (unmarked(text) if in_mark else text) + trail, "own", item["id"], region))
         else:  # illegible
             guess = text or original.strip() or item["edit"]["b_text"].strip()
-            edits.append(Edit(s, e, lead + uncertain(guess) + trail, "illegible", item["id"], region))
+            marked = unmarked(guess) if in_mark else uncertain(guess)
+            edits.append(Edit(s, e, lead + marked + trail, "illegible", item["id"], region))
     return edits, problems, warnings
 
 
@@ -270,7 +291,7 @@ def number_entries(final: str, segments: list[dict], ocr: dict, height: int, ser
         if tok.kind != "num":
             continue
         segment = next((s for s in segments if s["start"] <= tok.start and tok.end <= s["end"] and s["status"] != "marker"), None)
-        seen = vision_support(ocr, tokens, k, height)
+        seen = vision_support(ocr, final, tokens, k, height)
         kept = segment is not None and [tok.start, tok.end] in segment.get("kept", [])
         if segment is None:
             status = "ok" if seen else "unconfirmed"
@@ -281,16 +302,14 @@ def number_entries(final: str, segments: list[dict], ocr: dict, height: int, ser
         else:
             status = NUMBER_STATUS_BY_SEGMENT[segment["status"]]
         same_line = [t.norm for i, t in enumerate(tokens) if i != k and t.line == tok.line and distinctive(t)]
-        bbox, y_est = locate(
-            ocr["observations"], {tok.norm}, neighbour_norms(tokens, k, k + 1), (tok.line + 0.5) / line_total, height, same_line
-        )
+        bbox, y_est, _ = locate(ocr, {tok.norm}, neighbours(tokens, k, k + 1), (tok.line + 0.5) / line_total, height, same_line)
         if not (seen and bbox) and segment is not None and segment.get("bbox"):
             bbox = segment["bbox"]  # Vision did not see it here: show where the arbiter or the reviewer looked
         elif not seen:
             bbox = None  # a box Vision found for the same digits elsewhere would point to the wrong place
         entries.append({
             "start": tok.start, "end": tok.end, "status": status, "bbox": bbox, "y": round(y_est),
-            "zone": "service" if in_ranges(tok.start, tok.end, service) else "medical",
+            "zone": "service" if in_ranges(tok.start, tok.end, service) else "content",
         })
     return entries
 
@@ -310,6 +329,25 @@ def review_state(status: dict, key: str, final_sha: str, handled: set[str], repl
         "reply": replies.get(comment, ""),
         "updated_at": mark.get("updated_at", ""),
     }
+
+
+def old_zone(item: dict, a_service: list[tuple[int, int]]) -> str:
+    """The zone of a discrepancy from a comparison made before zones were recorded."""
+    span = item.get("edit", {}).get("a_span")
+    if span:
+        return "service" if in_ranges(span[0], max(span[0], span[1]), a_service) else "content"
+    seen = item.get("vision", {}).get("text", "")  # a number only Vision found: by the line it read
+    return "service" if seen and in_ranges(0, len(seen), service_ranges(seen)) else "content"
+
+
+NO_NOTES = {"", "-", "—", "нет", "нет заметок", "заметок нет", "none", "no notes"}
+
+
+def page_notes(paths: dict[str, Path], decisions_doc: dict) -> dict[str, str]:
+    """What the readers and the arbiter noted about the page for the reviewer, if anything."""
+    notes = {reader: load_text(paths[key]).strip() for reader, key in (("A", "notes_a"), ("B", "notes_b")) if paths[key].exists()}
+    notes["arbiter"] = str(decisions_doc.get("notes") or "").strip()
+    return {who: text for who, text in notes.items() if text.casefold().strip(" .") not in NO_NOTES}
 
 
 def build_page(doc: str, entry: dict, status: dict) -> dict:
@@ -343,14 +381,14 @@ def build_page(doc: str, entry: dict, status: dict) -> dict:
     for match in ATTENTION_RE.finditer(final):
         segments.append({"start": match.start(), "end": match.end(), "status": "marker", "id": ""})
     for seg in segments:
-        seg["zone"] = "service" if in_ranges(seg["start"], seg["end"], service) else "medical"
+        seg["zone"] = "service" if in_ranges(seg["start"], seg["end"], service) else "content"
     segments.sort(key=lambda s: (s["start"], s["end"]))
 
     ocr = load_ocr(paths["ocr"])
     numbers = number_entries(final, segments, ocr, height, service)
     final_sha = sha256_bytes(final.encode())
-    counts = Counter(n["status"] for n in numbers if n["zone"] == "medical")
-    counts["markers"] = sum(1 for s in segments if s["status"] == "marker" and s["zone"] == "medical")
+    counts = Counter(n["status"] for n in numbers if n["zone"] == "content")
+    counts["markers"] = sum(1 for s in segments if s["status"] == "marker" and s["zone"] == "content")
     counts["service"] = sum(1 for n in numbers if n["zone"] == "service" and n["status"] in NEEDS_LOOK) + sum(
         1 for s in segments if s["status"] == "marker" and s["zone"] == "service")
     a_service = service_ranges(a_text)
@@ -360,8 +398,7 @@ def build_page(doc: str, entry: dict, status: dict) -> dict:
         shown["decision"] = decisions.get(item["id"])
         if shown["decision"]:
             shown["region_bbox"] = region_bbox(valid_region(shown["decision"].get("region")), width, height)
-        span = item.get("edit", {}).get("a_span")
-        shown["zone"] = "service" if span and in_ranges(span[0], max(span[0], span[1]), a_service) else "medical"
+        shown["zone"] = item.get("zone") or old_zone(item, a_service)
         items.append(shown)
 
     handled = {str(x.get("comment", "")).strip() for x in corrections_doc.get("corrections", []) + corrections_doc.get("replies", [])}
@@ -383,6 +420,7 @@ def build_page(doc: str, entry: dict, status: dict) -> dict:
         "counts": dict(counts),
         "discrepancies": items,
         "extra_findings": decisions_doc.get("extra_findings", []),
+        "notes": page_notes(paths, decisions_doc),
         "corrections": corrections_doc.get("corrections", []),
         "problems": problems,
         "warnings": warnings,
@@ -465,7 +503,13 @@ def main() -> int:
     parser.add_argument("docs", nargs="*", help="parts of document names (default: all)")
     args = parser.parse_args()
     require_project()
+    # The review page saves marks into the same review data: building under its lock keeps a mark
+    # saved meanwhile from being lost (the page waits until the build is done).
+    with file_lock(REVIEW_DATA):
+        return build(args.docs)
 
+
+def build(selectors: list[str]) -> int:
     manifest = load_manifest()
     config = load_config()
     status = load_json(REVIEW_STATUS, {})
@@ -473,7 +517,7 @@ def main() -> int:
     by_doc = {d["doc"]: d for d in review["documents"]}
     failed = 0
 
-    for doc in select_docs(manifest, args.docs):
+    for doc in select_docs(manifest, selectors):
         meta = manifest["documents"][doc]
         pages = [build_page(doc, entry, status) for entry in meta["pages"]]
         if any("final" not in p for p in pages):

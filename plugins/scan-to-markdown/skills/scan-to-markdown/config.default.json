@@ -1,5 +1,5 @@
 {
-  "pipeline_version": "2.1.0",
+  "pipeline_version": "2.2.0",
   "paths": {
     "inbox": "inbox",
     "documents": "documents"

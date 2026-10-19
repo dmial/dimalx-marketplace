@@ -10,17 +10,32 @@ DOC is any part of a document name. By default only pages without results are in
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
 from common import LOG, ROOT, SKILL_DIR, CACHE, load_config, load_json, load_manifest, page_paths, require_project, save_json, select_docs
 
 
-def short_label(doc: str, page: int) -> str:
-    date, _, rest = doc.partition("_")
-    source = rest.partition("_")[0]
-    return f"{date} {source[:18]} p{page}"
+def short_labels(docs: list[str]) -> dict[str, str]:
+    """A short name per document for the workflow display and its failure reports: the date and
+    the source, plus the part of the title that tells apart documents sharing them ("(бланк 1)")."""
+    def parts(doc: str) -> tuple[str, str, str]:
+        date, _, rest = doc.partition("_")
+        source, _, title = rest.partition("_")
+        return date, source, title or rest or doc
+
+    labels = {doc: " ".join(filter(None, (parts(doc)[0], parts(doc)[1][:18]))) for doc in docs}
+    shared = Counter(labels.values())
+    for doc in docs:
+        if shared[labels[doc]] > 1:
+            title = parts(doc)[2]
+            tail = re.search(r"\([^()]*\)\s*$", title)
+            labels[doc] += " " + (tail.group().strip() if tail else title[-24:])
+    shared = Counter(labels.values())
+    return {doc: doc if shared[label] > 1 else label for doc, label in labels.items()}
 
 
 def common_args() -> dict:
@@ -34,6 +49,7 @@ def strips(entry: dict) -> list[list[int]]:
 
 def plan_read(docs: list[str], manifest: dict, config: dict, redo: bool) -> dict:
     pages = []
+    labels = short_labels(docs)
     for doc in docs:
         for entry in manifest["documents"][doc]["pages"]:
             paths = page_paths(doc, entry["page"])
@@ -41,7 +57,7 @@ def plan_read(docs: list[str], manifest: dict, config: dict, redo: bool) -> dict
             need_b = redo or not paths["read_b"].exists()
             if need_a or need_b:
                 pages.append({
-                    "doc": doc, "page": entry["page"], "label": short_label(doc, entry["page"]),
+                    "doc": doc, "page": entry["page"], "label": f"{labels[doc]} p{entry['page']}",
                     "height": entry["height"], "strips": strips(entry), "need_a": need_a, "need_b": need_b,
                 })
     return {
@@ -55,6 +71,7 @@ def plan_read(docs: list[str], manifest: dict, config: dict, redo: bool) -> dict
 
 def plan_arbitrate(docs: list[str], manifest: dict, config: dict, redo: bool) -> dict:
     pages = []
+    labels = short_labels(docs)
     for doc in docs:
         for entry in manifest["documents"][doc]["pages"]:
             paths = page_paths(doc, entry["page"])
@@ -69,7 +86,7 @@ def plan_arbitrate(docs: list[str], manifest: dict, config: dict, redo: bool) ->
             if current and not redo:
                 continue
             pages.append({
-                "doc": doc, "page": entry["page"], "label": short_label(doc, entry["page"]),
+                "doc": doc, "page": entry["page"], "label": f"{labels[doc]} p{entry['page']}",
                 "strips": strips(entry), "open": open_count,
             })
     return {

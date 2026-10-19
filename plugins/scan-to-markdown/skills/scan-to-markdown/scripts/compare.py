@@ -6,25 +6,32 @@ text A, the variant from text B, what Vision saw there, and enlarged crops of th
 (in the cache). Discrepancies are decided later by the arbiter; build.py assembles the final text.
 
 Kinds of discrepancies:
-  number / flag / text  A and B differ here (flag = arrows, triangles and signs like < > ± %)
+  number / flag / text  A and B differ here (flag = arrows, triangles and signs like < > ± % * !)
   cells                 table cell borders "|" differ: a value may sit in another column
   unsure                only one reader marked this place as uncertain [?…]
   order / moved         same tokens, different order, no cell border involved: no decision needed
   vision_check          A and B agree on a number that Vision did not see in that line
   vision_extra          Vision found a number that neither A nor B has
+Vision checks skip service information (stamps, requisites, certificates, footers): two agreeing
+readers are enough there. A number counts as seen in any form Vision gives it: "3, 24" as "3,24",
+"I25.1" as "125.1", the "3" of "СТ3" as "СТЗ". Every discrepancy has a zone, "service" when both
+readers' text there is service information: the arbiter decides those with a quick look.
 
 A discrepancy that touches a bracketed group such as [от руки: ✓], [печать: …] or (?) always
 covers the whole group on both sides, so choosing one reader's variant replaces whole groups.
+Punctuation glued to the end of a discrepancy joins it when the readers differ there
+("[?азн:]" against "[?дан]:"), so choosing B neither loses nor doubles a colon.
 The comparison id covers the inputs and the resulting list of discrepancies: if either changes,
-earlier arbiter decisions no longer apply.
+earlier arbiter decisions no longer apply. So a page the arbiter has decided keeps its comparison
+when this logic changes, as long as its readings and OCR stay the same: the text built from the
+decisions and the reviewer's marks stay valid. --redo compares such pages again.
 
-Usage: python3 compare.py [DOC ...]   (from the project folder)
+Usage: python3 compare.py [DOC ...] [--redo]   (from the project folder)
 """
 from __future__ import annotations
 
 import argparse
 import difflib
-import json
 import sys
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -37,19 +44,26 @@ from common import (
     Token,
     bracket_groups,
     code_version,
+    comparison_id,
+    decided,
     distinctive,
+    in_ranges,
+    inputs_changed,
+    number_forms,
     require_project,
     load_config,
+    load_json,
     load_manifest,
     load_ocr,
     load_text,
     locate,
     neighbour_norms,
+    neighbours,
     page_paths,
     rel,
     save_json,
     select_docs,
-    sha256_bytes,
+    service_ranges,
     tokenize,
     vision_support,
 )
@@ -129,6 +143,14 @@ class Text:
         if start == end:
             return first, last
         return min(start, first), max(end, last)
+
+    def glue_end(self, end: int) -> int:
+        """End of the punctuation glued to position end: up to a space, a token or a new mark."""
+        starts = {t.start for t in self.tokens}
+        pos = end
+        while pos < len(self.text) and not self.text[pos].isspace() and pos not in starts and self.text[pos] not in "[(|":
+            pos += 1
+        return pos
 
     def context(self, start: int, end: int) -> str:
         left = self.text[max(0, start - CONTEXT_CHARS):start]
@@ -223,6 +245,22 @@ def merge_overlapping(units: list[Unit], a: Text, b: Text, a2b: dict, b2a: dict)
         units = [u for k, u in enumerate(units) if k not in pair] + [settle(merged, a, b, a2b, b2a)]
 
 
+def take_glued_punctuation(units: list[Unit], a: Text, b: Text) -> list[Unit]:
+    """Grow a unit over the punctuation glued to its end when A and B differ there, as in "[?азн:]"
+    against "[?дан]:". The text between units comes from A: without this, choosing B would drop
+    B's colon (or keep A's next to B's own one in the mirrored case)."""
+    grown = []
+    for n, u in enumerate(units):
+        if u.sa < u.ea and u.sb < u.eb:
+            ga, gb = a.glue_end(u.ea), b.glue_end(u.eb)
+            following = units[n + 1] if n + 1 < len(units) else None
+            fits = following is None or (ga <= following.sa and gb <= following.sb)
+            if a.text[u.ea:ga] != b.text[u.eb:gb] and fits:
+                u = replace(u, ea=ga, eb=gb)
+        grown.append(u)
+    return grown
+
+
 def edit_for_unit(a: Text, b: Text, u: Unit) -> dict:
     """Where text A changes if B's reading wins, and what goes there."""
     if u.sa < u.ea and u.sb < u.eb:
@@ -285,7 +323,9 @@ class Cropper:
         for old in out_dir.glob(f"p{page}_*.png"):
             old.unlink()
 
-    def save(self, item_id: str, bbox: list[float] | None, y_est: float, row_only: bool = False) -> list[str]:
+    def save(self, item_id: str, bbox: list[float] | None, span: tuple[float, float], row_only: bool = False) -> list[str]:
+        """With a box: the row (box framed) and, unless row_only, a close-up; without: the band
+        between the estimated top and bottom of the spot."""
         width, height = self.image.size
         paths = []
         if bbox and row_only:
@@ -311,8 +351,8 @@ class Cropper:
             zoom = zoom.resize((round(zoom.width * scale), round(zoom.height * scale)), Image.Resampling.LANCZOS)
             paths.append(self._write(zoom, f"p{self.page}_{item_id}_zoom.png"))
         else:
-            top = max(0, round(y_est - 90))
-            bottom = min(height, round(y_est + 90))
+            top = max(0, round(min(span[0] - 60, (span[0] + span[1]) / 2 - 90)))
+            bottom = min(height, round(max(span[1] + 60, (span[0] + span[1]) / 2 + 90)))
             paths.append(self._write(self.image.crop((0, top, width, bottom)), f"p{self.page}_{item_id}_band.png"))
         return paths
 
@@ -378,7 +418,7 @@ def diff_units(a: Text, b: Text) -> tuple[list[Unit], dict[int, int], float]:
         if j1 < j2:
             sb, eb = b.tokens[j1].start, b.tokens[j2 - 1].end
         units.append(settle(Unit(kind, i1, i2, j1, j2, sa, ea, sb, eb, (i1, i2, j1, j2)), a, b, a2b, b2a))
-    return merge_overlapping(units, a, b, a2b, b2a), a2b, matcher.ratio()
+    return take_glued_punctuation(merge_overlapping(units, a, b, a2b, b2a), a, b), a2b, matcher.ratio()
 
 
 def compare_page(doc: str, entry: dict, version: str) -> dict:
@@ -394,14 +434,21 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
     height = entry["height"]
     cropper = Cropper(paths["image"], paths["crops_dir"], page)
 
-    def where(interest: set[str], i1: int, i2: int, start: int) -> tuple[list[float] | None, float]:
+    def where(interest: set[str], i1: int, i2: int, start: int) -> tuple[list[float] | None, float, tuple[float, float]]:
         line = a.line_of(start)
-        same_line = [t.norm for k, t in enumerate(a.tokens) if t.line == line and not i1 <= k < i2 and distinctive(t)]
-        return locate(
-            observations, interest, neighbour_norms(a.tokens, i1, i2), (line + 0.5) / a.line_count, height, same_line
-        )
+        # Text only B has is printed where B saw it, not necessarily on A's line at the insertion point.
+        same_line = [t.norm for k, t in enumerate(a.tokens) if t.line == line and not i1 <= k < i2 and distinctive(t)] if i1 < i2 else []
+        return locate(ocr, interest, neighbours(a.tokens, i1, i2), (line + 0.5) / a.line_count, height, same_line)
 
     units, a2b, similarity = diff_units(a, b)
+    a_service, b_service = service_ranges(a.text), service_ranges(b.text)
+
+    def zone(u: Unit) -> str:
+        """Service only if what each reader wrote there is service (stamps, requisites, footers)."""
+        a_side = u.sa == u.ea or in_ranges(u.sa, u.ea, a_service)
+        b_side = u.sb == u.eb or in_ranges(u.sb, u.eb, b_service)
+        return "service" if a_side and b_side else "content"
+
     entries: list[tuple[int, dict]] = []
     for u in units:
         ci1, ci2, cj1, cj2 = u.chunk
@@ -418,19 +465,21 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
             "b": side(b, u.sb, u.eb),
             "edit": edit_for_unit(a, b, u),
             "vision": {
-                "a_numbers": {a.tokens[k].raw: vision_support(ocr, a.tokens, k, height) for k in range(u.i1, u.i2) if a.tokens[k].kind == "num"},
-                "b_numbers": {b.tokens[k].raw: vision_support(ocr, b.tokens, k, height) for k in range(u.j1, u.j2) if b.tokens[k].kind == "num"},
+                "a_numbers": {a.tokens[k].raw: vision_support(ocr, a.text, a.tokens, k, height) for k in range(u.i1, u.i2) if a.tokens[k].kind == "num"},
+                "b_numbers": {b.tokens[k].raw: vision_support(ocr, b.text, b.tokens, k, height) for k in range(u.j1, u.j2) if b.tokens[k].kind == "num"},
             },
             "_where": where(interest, u.i1, u.i2, u.sa),
+            "zone": zone(u),
         }))
 
     # Numbers both readers agree on but Vision does not show in that line: checked by the arbiter.
+    # In service information (requisites, certificates, footers) two agreeing readers are enough.
     covered = [(u.sa, u.ea) for u in units]
     checks: list[list[int]] = []
     for k, tok in enumerate(a.tokens):
         if tok.kind != "num" or k not in a2b or any(s <= tok.start < e for s, e in covered):
             continue
-        if vision_support(ocr, a.tokens, k, height):
+        if in_ranges(tok.start, tok.end, a_service) or vision_support(ocr, a.text, a.tokens, k, height):
             continue
         if checks and checks[-1][1] == k and a.tokens[k - 1].line == tok.line:
             checks[-1][1] = k + 1  # adjacent unconfirmed numbers on one line form one check
@@ -447,12 +496,13 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
             "edit": {"mode": "inline", "a_span": [start, end], "b_text": b.text[b.tokens[j1].start:b.tokens[j2 - 1].end]},
             "vision": {"a_numbers": {a.tokens[k].raw: False for k in range(i1, i2)}, "b_numbers": {}},
             "_where": where(line_words or set(neighbour_norms(a.tokens, i1, i2)), i1, i2, start),
+            "zone": "content",
         }))
 
     discrepancies = []
     for n, (_, item) in enumerate(sorted(entries, key=lambda e: e[0]), 1):
         item_id = f"d{n:02d}"
-        bbox, y_est = item.pop("_where")
+        bbox, _, span = item.pop("_where")
         needs = item["kind"] in DECIDABLE
         discrepancies.append({
             "id": item_id,
@@ -461,14 +511,15 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
             **item,
             "bbox": bbox,
             # A check's box is found from other words of its line, so show the whole line, not a close-up.
-            "crops": cropper.save(item_id, bbox, y_est, row_only=item["kind"] == "vision_check") if needs else [],
+            "crops": cropper.save(item_id, bbox, span, row_only=item["kind"] == "vision_check") if needs else [],
         })
 
-    # Numbers that Vision saw but neither reader wrote: possible omissions by both.
-    ab_nums = {t.norm for t in a.tokens + b.tokens if t.kind == "num"}
+    # Numbers that Vision saw but neither reader wrote: possible omissions by both. A reading such
+    # as "3,24" for "3, 24" or "125.1" for "I25.1" is no omission; service lines are not checked.
+    ab_nums = number_forms(a.text, a.tokens) | number_forms(b.text, b.tokens)
     for obs in observations:
         missing = [num for num in obs["best_numbers"] if num not in ab_nums and not any(num in other for other in ab_nums)]
-        if not missing:
+        if not missing or in_ranges(0, len(obs["text"]), service_ranges(obs["text"])):
             continue
         if any(alt and all(num in ab_nums for num in alt) for alt in obs["alt_numbers"]):
             continue  # Vision itself had a reading that matches the readers
@@ -479,19 +530,15 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
             "kind": "vision_extra",
             "needs_decision": True,
             "vision": {"text": obs["text"], "missing_numbers": missing},
+            "zone": "content",
             "bbox": obs["bbox"],
-            "crops": cropper.save(item_id, obs["bbox"], y + h / 2),
+            "crops": cropper.save(item_id, obs["bbox"], (y + h / 2, y + h / 2)),
         })
 
     kinds = Counter(d["kind"] for d in discrepancies)
-    # The id depends on what the arbiter decides about, not on the code version: pages whose
-    # inputs and discrepancies stay the same keep their decisions after a pipeline update.
-    content = [{k: v for k, v in d.items() if k not in ("bbox", "crops")} for d in discrepancies]
-    compare_id = sha256_bytes(json.dumps(
-        [a_raw, b_raw, paths["ocr"].read_text(encoding="utf-8"), content], ensure_ascii=False, sort_keys=True
-    ).encode())[:16]
     return {
-        "compare_id": compare_id,
+        # Pages whose inputs and discrepancies stay the same keep their decisions after an update.
+        "compare_id": comparison_id(a_raw, b_raw, paths["ocr"].read_text(encoding="utf-8"), discrepancies),
         "logic": code_version("compare.py", "common.py"),
         "doc": doc,
         "page": page,
@@ -513,6 +560,7 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare reader A and B with each other and with Vision OCR.")
     parser.add_argument("docs", nargs="*", help="parts of document names (default: all)")
+    parser.add_argument("--redo", action="store_true", help="also compare pages the arbiter has already decided")
     args = parser.parse_args()
     require_project()
 
@@ -523,6 +571,10 @@ def main() -> int:
             paths = page_paths(doc, entry["page"])
             if not (paths["read_a"].exists() and paths["read_b"].exists()):
                 print(f"skip (not read yet): {doc} p{entry['page']}")
+                continue
+            stored = load_json(paths["compare"])
+            if stored and not args.redo and not inputs_changed(paths, stored) and decided(paths, stored):
+                print(f"kept (decided): {doc} p{entry['page']}")
                 continue
             result = compare_page(doc, entry, version)
             save_json(paths["compare"], result)

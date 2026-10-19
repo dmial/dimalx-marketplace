@@ -4,6 +4,7 @@
 Usage: python3 review_server.py [--port N]   (from the project folder; default port from settings)
 Listens on 127.0.0.1 only. Marks and comments are saved to logs/scan-to-markdown/review-status.json together with
 the checksum of the page text they refer to, so a mark goes stale if the text changes later.
+A save waits while build.py rewrites the review data (both hold the same file lock).
 """
 from __future__ import annotations
 
@@ -18,12 +19,12 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
-from common import LOG, ROOT, SETTINGS, SKILL_DIR, CACHE, load_json, require_project, save_json
+from common import LOG, ROOT, SETTINGS, SKILL_DIR, CACHE, file_lock, load_json, require_project, save_json
 
 STATUS_PATH = LOG / "review-status.json" if LOG else None
 DATA_PATH = CACHE / "review-data.json" if CACHE else None
 PAGE_PATH = SKILL_DIR / "review" / "index.html"
-LOCK = threading.Lock()
+LOCK = threading.Lock()  # between this server's threads; file_lock(DATA_PATH) between processes
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -58,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
             "final_sha256": str(body.get("final_sha256", "")),
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        with LOCK:
+        with LOCK, file_lock(DATA_PATH):
             status = load_json(STATUS_PATH, {})
             status[key] = mark
             save_json(STATUS_PATH, dict(sorted(status.items())))

@@ -6,7 +6,7 @@ Usage (from the project folder):
   python3 run.py init [--inbox NAME] [--documents NAME]
                                     set up the inbox, the documents folder and logs/scan-to-markdown/ here
                                     (default names: inbox/ and documents/)
-  python3 run.py status [DOC ...]   what is in the inbox and the stage of every document
+  python3 run.py status [DOC ...]   what is in the inbox (scans and pages) and the stage of every document
   python3 run.py advance [DOC ...]  do what code can, then print one of:
       ACTION read | ACTION arbitrate | ACTION corrections   the agent acts, then runs advance again
       WAIT review                                           the person reviews pages
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,8 @@ from common import (  # noqa: E402
     SETTINGS_NAME,
     SKILL_DIR,
     code_version,
+    decided,
+    inputs_changed,
     load_json,
     load_manifest,
     page_paths,
@@ -115,20 +118,30 @@ def changed_pdfs(manifest: dict, selectors: list[str]) -> list[Path]:
     return [pdf for pdf in inbox_pdfs(selectors) if known.get(pdf.name) != sha256_file(pdf)]
 
 
+def page_count(pdf: Path) -> int | None:
+    try:
+        info = subprocess.run(["pdfinfo", str(pdf)], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    found = re.search(r"^Pages:\s+(\d+)", info, re.M)
+    return int(found.group(1)) if found else None
+
+
 def name_clashes(selectors: list[str]) -> list[str]:
     """Inbox scans whose name is already taken in documents/: moving them would overwrite a document."""
     return [pdf.name for pdf in inbox_pdfs(selectors) if (DOCUMENTS / pdf.name).exists()]
 
 
 def stale_compare(doc: str, page: int, logic: str) -> bool:
+    """Does compare.py have work on this page? A page the arbiter has decided keeps its comparison
+    when the logic changes."""
     paths = page_paths(doc, page)
     if not (paths["read_a"].exists() and paths["read_b"].exists()):
         return False
     data = load_json(paths["compare"])
-    if data is None or data.get("logic") != logic:
+    if data is None or inputs_changed(paths, data):
         return True
-    newest_input = max(paths[k].stat().st_mtime for k in ("read_a", "read_b", "ocr"))
-    return newest_input > paths["compare"].stat().st_mtime
+    return data.get("logic") != logic and not decided(paths, data)
 
 
 def review_pages(docs: list[str]) -> list[tuple[str, dict]]:
@@ -159,7 +172,10 @@ def status(selectors: list[str]) -> int:
         n = len(pages)
         print(f"{doc[:58]:58} {n:5}  {read}/{n}   {arbitrated}/{n}      {built}/{n}    {verified}/{n}       {comments}")
     waiting = inbox_pdfs(selectors)
-    print(f"\ninbox ({rel(INBOX)}/): {len(waiting)} scan(s), {len(changed_pdfs(manifest, selectors))} not prepared yet")
+    new = changed_pdfs(manifest, selectors)
+    counts = [page_count(pdf) for pdf in new]
+    pages = f", {sum(c for c in counts if c)} page(s)" + (" and more (pdfinfo failed on some)" if None in counts else "") if new else ""
+    print(f"\ninbox ({rel(INBOX)}/): {len(waiting)} scan(s), {len(new)} not prepared yet{pages}")
     return 0
 
 

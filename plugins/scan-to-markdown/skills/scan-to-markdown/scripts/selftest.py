@@ -5,10 +5,13 @@ Invariants:
   * choosing A everywhere reproduces text A character for character;
   * choosing B everywhere reproduces text B: character for character on the built-in cases
     (their agreed parts are identical), and as the same sequence of words, numbers, signs,
-    brackets and colons on real pages (agreed parts may differ in spacing there);
+    brackets, colons and asterisks on real pages (agreed parts may differ in spacing there);
   * any mix of choices keeps every table row whole;
   * a reviewer's correction replaces exactly its fragment and moves later marks along;
+  * an unreadable number inside an uncertainty mark ([?4]) gets no second mark;
+  * Vision's forms of a number count as seeing it: "3,24" for "3, 24", "СТЗ" for "СТ3", "125.1" for "I25.1";
   * stamps, logos and requisite lines fall into the service zone, test results do not.
+A failure names the case and shows both texts only around the first place where they part.
 
 Usage: python3 selftest.py   (inside a project it also checks every page that has both readings)
 """
@@ -19,8 +22,19 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
-from build import Edit, apply_corrections, apply_edits  # noqa: E402
-from common import ROOT, in_ranges, load_manifest, load_text, page_paths, service_ranges, tokenize  # noqa: E402
+from build import Edit, apply_corrections, apply_edits, plan_edits  # noqa: E402
+from common import (  # noqa: E402
+    ROOT,
+    codes,
+    in_ranges,
+    load_manifest,
+    load_text,
+    number_forms,
+    page_paths,
+    service_ranges,
+    tokenize,
+    vision_support,
+)
 from compare import Text, diff_units, edit_for_unit  # noqa: E402
 
 # All sample data below is made up; none of it comes from real documents.
@@ -48,6 +62,10 @@ CASES = [
     ("flag in another column", "| строка ▲ [от руки: ✓] | 4.87 | ммоль/л |", "| строка | ▲ [от руки: ✓] 4.87 | ммоль/л |"),
     ("value in the reference column", "| Показатель | 4.87 | (3.5 - 5.0) |", "| Показатель | | 4.87 (3.5 - 5.0) |"),
     ("two border moves in one row", "| строка [?▲] [от руки: ✓] | [от руки: ↑] 4.87 |", "| строка | ▲ [от руки: пометка] [от руки: ↑] 4.87 |"),
+    ("colon inside a mark only in A", "[обрезано][?азн:] 12.03.2024 10:20:30", "[обрезано][?дан]: 12.03.2024 10:20:30"),
+    ("colon inside a mark only in B", "[?дан]: 12.03.2024", "[?азн:] 12.03.2024"),
+    ("footnote star inside a mark only in B", "[печать: Лаборатория № 12]\n\n* Время указано", "[печать: Лаборатория № 12]\n\n[?*] Время указано"),
+    ("star flag only in A", "| Глюкоза | 6.70 * | ммоль/л |", "| Глюкоза | 6.70 | ммоль/л |"),
 ]
 # Cases where line breaks legitimately stay as in A, so B is matched by structure, not character by character.
 LAYOUT_CASES = [
@@ -57,6 +75,7 @@ LAYOUT_CASES = [
 SAME = [
     ("homoglyphs and decimal comma", "Т3(общ) = 2,45 нмоль/л", "T3(общ) = 2.45 нмоль/л"),
     ("table spacing and case", "| Показатель | 128 г/л |", "|Показатель|128 Г/Л|"),
+    ("superscript in a unit", "Объем 331 см³.", "Объем 331 см3."),
 ]
 
 
@@ -66,13 +85,35 @@ def squeeze(text: str) -> str:
     return re.sub(r" *([\[\]]) *", r"\1", re.sub(r" +", " ", text))
 
 
-STRUCTURE_RE = re.compile(r"[\[\]:]")
+STRUCTURE_RE = re.compile(r"[\[\]:*]")
 
 
-def structure(text: str) -> list[str]:
-    """Words, numbers and signs together with brackets and colons, in order."""
+def structure(text: str) -> list[tuple[int, str]]:
+    """Words, numbers and signs together with brackets, colons and asterisks, in order, with positions."""
     marks = [(m.start(), m.group()) for m in STRUCTURE_RE.finditer(text)]
-    return [norm for _, norm in sorted(marks + [(t.start, t.norm) for t in tokenize(text)])]
+    return sorted(set(marks + [(t.start, t.norm) for t in tokenize(text)]))
+
+
+def excerpt(text: str, pos: int, width: int = 40) -> str:
+    return text[max(0, pos - width):pos + width].replace("\n", "⏎")
+
+
+def first_difference(got: str, expected: str) -> str:
+    """Both texts around the first character where they part."""
+    pos = next((i for i, (x, y) in enumerate(zip(got, expected)) if x != y), min(len(got), len(expected)))
+    return f"at char {pos}: got «{excerpt(got, pos)}», expected «{excerpt(expected, pos)}»"
+
+
+def structure_difference(got: str, expected: str) -> str | None:
+    """None if both texts have the same structure, else both around the first place where it parts."""
+    a, b = structure(got), structure(expected)
+    if [n for _, n in a] == [n for _, n in b]:
+        return None
+    k = next((i for i, (x, y) in enumerate(zip(a, b)) if x[1] != y[1]), min(len(a), len(b)))
+    pos_a = a[k][0] if k < len(a) else len(got)
+    pos_b = b[k][0] if k < len(b) else len(expected)
+    item = lambda seq: f"«{seq[k][1]}»" if k < len(seq) else "the end"
+    return f"{item(a)} where text B has {item(b)}: got «{excerpt(got, pos_a)}», expected «{excerpt(expected, pos_b)}»"
 
 
 def run_case(name: str, a_text: str, b_text: str, exact: bool = True) -> list[str]:
@@ -101,9 +142,12 @@ def run_case(name: str, a_text: str, b_text: str, exact: bool = True) -> list[st
 
     take_b = [Edit(e["a_span"][0], e["a_span"][1], e["b_text"], "resolved", f"u{n}") for n, e in enumerate(edits)]
     final_b, _, problems = apply_edits(a_text, take_b, 1000, 1000)
-    matches = squeeze(final_b) == squeeze(b_text) if exact else structure(final_b) == structure(b_text)
-    if problems or not matches:
-        errors.append(f"{name}: choosing B gave {final_b!r}, expected {b_text!r} {problems}")
+    if exact:
+        differs = None if squeeze(final_b) == squeeze(b_text) else first_difference(squeeze(final_b), squeeze(b_text))
+    else:
+        differs = structure_difference(final_b, b_text)
+    if problems or differs:
+        errors.append(f"{name}: choosing B does not give text B {differs or ''} {problems or ''}".rstrip())
     return errors
 
 
@@ -125,6 +169,48 @@ def check_corrections() -> list[str]:
     return errors
 
 
+def check_marks() -> list[str]:
+    """An unreadable number inside a mark that already says "not sure" keeps a single mark."""
+    errors = []
+    text = "Сертификат: 1234567[?4][обрезано]\nВладелец"
+    s = text.index("[?4]") + 2
+    compare = {"discrepancies": [{"id": "d01", "kind": "vision_check", "needs_decision": True,
+                                  "edit": {"mode": "inline", "a_span": [s, s + 1], "b_text": "4"}}]}
+    for verdict, said in (("illegible", "4"), ("illegible", "[?4]"), ("own", "[?1]")):
+        decision = {"id": "d01", "verdict": verdict, "text": said, "region": [10, 12, 0, 50]}
+        edits, problems, _ = plan_edits(text, compare, {"d01": decision})
+        final, _, more = apply_edits(text, edits, 1000, 1000)
+        expected = text.replace("[?4]", "[?1]") if verdict == "own" else text
+        if problems or more or final != expected:
+            errors.append(f"{verdict} «{said}» inside [?4] gave {final!r}, expected {expected!r}")
+    return errors
+
+
+def check_vision_forms() -> list[str]:
+    """The forms in which Vision may show a number the readers wrote."""
+    errors = []
+
+    def seen(text: str, number: str, vision: str) -> bool:
+        tokens = tokenize(text)
+        k = next(i for i, t in enumerate(tokens) if t.raw == number)
+        obs = {"text": vision, "bbox": [0, 100, 500, 30], "norms": {t.norm for t in tokenize(vision)}, "codes": codes(vision)}
+        return vision_support({"observations": [obs], "line_height": 30.0}, text, tokens, k, 1000)
+
+    for text, number, vision, expected in [
+        ("| Т3 св | 3, 24 | пмоль/л |", "24", "3,24 пмоль/л", True),
+        ("| Т3 св | 3, 24 | пмоль/л |", "24", "3,21 пмоль/л", False),
+        ("трийодтиронина (СТ3) в крови", "3", "трийодтиронина (СТЗ) в крови", True),
+        ("Диагноз:I25.1. Атеросклероз", "25.1", "Диагноз:125.1. Атеросклероз", True),
+        ("Диагноз:I25.1. Атеросклероз", "25.1", "Диагноз:126.1. Атеросклероз", False),
+    ]:
+        if seen(text, number, vision) != expected:
+            errors.append(f"Vision reading «{vision}» of «{number}» in «{text}»: expected seen={expected}")
+    forms = number_forms("Диагноз:I11.9; результат 15, 00", tokenize("Диагноз:I11.9; результат 15, 00"))
+    if not {"111.9", "15.00"} <= forms:
+        errors.append(f"number forms miss Vision's readings: {sorted(forms)}")
+    return errors
+
+
 def check_zones() -> list[str]:
     errors = []
     text = ("| Показатель | 4.87 | (3.5 - 5.0) |\n"
@@ -134,18 +220,18 @@ def check_zones() -> list[str]:
             "Дата рождения: 01.01.1970\n"
             "- Диета №5, выданы рекомендации. Подробнее https://example.org")
     zones = service_ranges(text)
-    for fragment, zone in [("4.87", "medical"), ("1027700000000", "service"), ("01.02.2020", "service"),
-                           ("[?8]", "service"), ("01.01.1970", "medical"), ("5", "medical"),
+    for fragment, zone in [("4.87", "content"), ("1027700000000", "service"), ("01.02.2020", "service"),
+                           ("[?8]", "service"), ("01.01.1970", "content"), ("5", "content"),
                            ("https://example.org", "service")]:
         start = text.index(fragment, text.index("Диета №") if fragment == "5" else 0)
-        got = "service" if in_ranges(start, start + len(fragment), zones) else "medical"
+        got = "service" if in_ranges(start, start + len(fragment), zones) else "content"
         if got != zone:
             errors.append(f"zone of «{fragment}» is {got}, expected {zone}")
     return errors
 
 
 def main() -> int:
-    errors: list[str] = check_corrections() + check_zones()
+    errors: list[str] = check_corrections() + check_marks() + check_vision_forms() + check_zones()
     for case in CASES:
         errors += run_case(*case)
     for case in LAYOUT_CASES:
@@ -164,7 +250,7 @@ def main() -> int:
                 errors += run_case(f"{doc} p{entry['page']}", load_text(paths["read_a"]), load_text(paths["read_b"]), exact=False)
     for error in errors:
         print("FAIL", error)
-    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 2} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
+    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 4} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
     return 1 if errors else 0
 
 

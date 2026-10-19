@@ -20,7 +20,7 @@ const REPORT = {
     decisions_path: { type: 'string' },
     decided: { type: 'integer', description: 'number of decisions written' },
     extra_findings: { type: 'integer', description: 'number of extra_findings written' },
-    notes: { type: 'string', description: 'anything the human reviewer should know, or empty' },
+    notes: { type: 'string', description: 'the same notes as in the "notes" field of the decisions file, in Russian, or empty' },
   },
   required: ['decisions_path', 'decided', 'extra_findings', 'notes'],
 }
@@ -28,7 +28,7 @@ const REPORT = {
 function prompt(t) {
   const strips = t.strips.map(([y0, y1], i) => `   ${i + 1}) ${stripPath(t, i)} (пиксели ${y0}–${y1} по высоте)`).join('\n')
   return [
-    'Ты — арбитр: по скану решаешь, какое из двух прочтений страницы медицинского документа верно.',
+    'Ты — арбитр: по скану решаешь, какое из двух прочтений страницы документа верно.',
     `Корень репозитория: ${args.root}`,
     `1. Прочитай правила и следуй им буквально: ${args.rules}`,
     `   Правила читателей (обозначения и что не переносится): ${args.reader_rules}`,
@@ -60,4 +60,4 @@ log(`${done.length}/${args.pages.length} pages arbitrated`)
 return results.map((r, i) =>
   r && r.report
     ? { doc: r.doc, page: r.page, decided: r.report.decided, extra_findings: r.report.extra_findings, notes: r.report.notes }
-    : { failed_page: args.pages[i].label })
+    : { failed_page: args.pages[i].label, doc: args.pages[i].doc, page: args.pages[i].page })
