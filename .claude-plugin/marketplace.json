@@ -18,6 +18,13 @@
       "description": "Puts the marks a paper document carries onto a PDF: a stored handwritten signature and a company seal, both anchored to the signature block automatically, with a preview crop for visual check.",
       "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/pdf-marks",
       "license": "MIT"
+    },
+    {
+      "name": "scan-to-markdown",
+      "source": "./plugins/scan-to-markdown",
+      "description": "Verbatim transcription of scanned documents into Markdown: two independent model readings, comparison against Apple Vision OCR, an arbiter for disputed spots and a local review page for the person.",
+      "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/scan-to-markdown",
+      "license": "MIT"
     }
   ]
 }

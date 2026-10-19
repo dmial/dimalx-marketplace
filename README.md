@@ -55,6 +55,21 @@ python3 prep.py ~/Downloads/IMG_1234.HEIC ~/Documents/Stamps/acme.png --rotate 9
 
 Подробнее: [sign-pdf](plugins/pdf-marks/skills/sign-pdf/SKILL.md), [stamp-pdf](plugins/pdf-marks/skills/stamp-pdf/SKILL.md)
 
+### scan-to-markdown
+
+Дословно переносит сканы бумажных документов, прежде всего медицинских, в Markdown. Каждую страницу независимо читают две модели, код сверяет их между собой и с распознаванием Apple Vision, спорные места разбирает арбитр по скану. В конце человек сверяет страницы на локальной странице сверки и оставляет комментарии, а агент превращает их в правки. Фразы: «оцифруй сканы», «сделай остальные документы», «поправь по комментариям».
+
+Установка:
+
+```
+/plugin install scan-to-markdown@dimalx-marketplace
+brew install poppler
+```
+
+Нужны macOS (Apple Vision) и Xcode Command Line Tools.
+
+Подробнее: [scan-to-markdown](plugins/scan-to-markdown/README.md)
+
 ## Лицензия
 
 [MIT](LICENSE)

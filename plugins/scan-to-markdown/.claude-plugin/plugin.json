@@ -1,0 +1,12 @@
+{
+  "name": "scan-to-markdown",
+  "version": "0.1.0",
+  "description": "Verbatim transcription of scanned documents (photos of paper, medical first of all) into Markdown: two independent model readings, code comparison against Apple Vision OCR, an arbiter for disputed spots, and a local review page where a person verifies pages and leaves corrections.",
+  "author": {
+    "name": "Dmitry Alekseev",
+    "email": "dimalexeev@gmail.com"
+  },
+  "homepage": "https://github.com/dmial/dimalx-marketplace/tree/main/plugins/scan-to-markdown",
+  "repository": "https://github.com/dmial/dimalx-marketplace",
+  "license": "MIT"
+}

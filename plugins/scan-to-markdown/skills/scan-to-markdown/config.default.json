@@ -1,0 +1,78 @@
+{
+  "pipeline_version": "2.1.0",
+  "paths": {
+    "inbox": "inbox",
+    "documents": "documents"
+  },
+  "name_pattern": "^(?P<date>\\d{4}-\\d{2}-\\d{2})_(?P<source>[^_]+)_(?P<title>.+)$",
+  "review_port": 8770,
+  "reader_a": {
+    "model": "claude-fable-5-1",
+    "effort": "xhigh",
+    "input": "full page"
+  },
+  "reader_b": {
+    "model": "claude-opus-5-5",
+    "effort": "xhigh",
+    "input": "horizontal strips"
+  },
+  "arbiter": {
+    "model": "claude-fable-5-1",
+    "effort": "max"
+  },
+  "strips": {
+    "height_px": 760,
+    "min_overlap_px": 140
+  },
+  "ocr": {
+    "engine": "apple-vision",
+    "languages": [
+      "ru-RU",
+      "en-US"
+    ],
+    "language_correction": false
+  },
+  "service_zone": {
+    "marks": [
+      "печать",
+      "логотип",
+      "штрихкод",
+      "qr-код",
+      "изображение",
+      "подпись"
+    ],
+    "line_keywords": [
+      "сертификат",
+      "владелец",
+      "действителен",
+      "документ подписан",
+      "электронной подписью",
+      "лицензи",
+      "инн ",
+      "огрн",
+      "кпп",
+      "бик",
+      "окпо",
+      "р/с",
+      "к/с",
+      "контакт-центр",
+      "телефон",
+      "тел.",
+      "факс",
+      "e-mail",
+      "email",
+      "россия,",
+      "заказ №",
+      "образец №",
+      "страница",
+      "отчет создан",
+      "отчёт создан",
+      "дата печати"
+    ],
+    "token_patterns": [
+      "https?://\\S+",
+      "www\\.\\S+",
+      "\\S+@\\S+"
+    ]
+  }
+}
