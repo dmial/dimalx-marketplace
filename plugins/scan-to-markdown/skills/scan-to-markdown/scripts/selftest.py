@@ -9,8 +9,10 @@ Invariants:
   * any mix of choices keeps every table row whole;
   * a reviewer's correction replaces exactly its fragment and moves later marks along;
   * an unreadable number inside an uncertainty mark ([?4]) gets no second mark;
-  * Vision's forms of a number count as seeing it: "3,24" for "3, 24", "СТЗ" for "СТ3", "125.1" for "I25.1";
-  * stamps, logos and requisite lines fall into the service zone, test results do not.
+  * Vision's forms of a number count as seeing it: "3,24" for "3, 24", "СТЗ" for "СТ3", "125.1" for "I25.1",
+    "1019" for "10^9";
+  * stamps, logos and requisite lines fall into the service zone, test results do not;
+  * in the Markdown file an asterisk that starts a line is escaped, so it is not taken for a list.
 A failure names the case and shows both texts only around the first place where they part.
 
 Usage: python3 selftest.py   (inside a project it also checks every page that has both readings)
@@ -22,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
-from build import Edit, apply_corrections, apply_edits, plan_edits  # noqa: E402
+from build import Edit, apply_corrections, apply_edits, markdown_safe, plan_edits  # noqa: E402
 from common import (  # noqa: E402
     ROOT,
     codes,
@@ -202,11 +204,15 @@ def check_vision_forms() -> list[str]:
         ("трийодтиронина (СТ3) в крови", "3", "трийодтиронина (СТЗ) в крови", True),
         ("Диагноз:I25.1. Атеросклероз", "25.1", "Диагноз:125.1. Атеросклероз", True),
         ("Диагноз:I25.1. Атеросклероз", "25.1", "Диагноз:126.1. Атеросклероз", False),
+        ("| Лейкоциты | 6.30 *10^9/л | 4.0 - 9.0 |", "9", "6.30 *1019/л", True),
+        ("| Лейкоциты | 6.30 *10^9/л | 4.0 - 9.0 |", "10", "6.30 *1019/л", True),
+        ("| Лейкоциты | 6.30 *10^9/л | 4.0 - 9.0 |", "9", "6.30 *1012/л", False),
     ]:
         if seen(text, number, vision) != expected:
             errors.append(f"Vision reading «{vision}» of «{number}» in «{text}»: expected seen={expected}")
-    forms = number_forms("Диагноз:I11.9; результат 15, 00", tokenize("Диагноз:I11.9; результат 15, 00"))
-    if not {"111.9", "15.00"} <= forms:
+    sample = "Диагноз:I11.9; результат 15, 00; лейкоциты 6.30 *10^9/л"
+    forms = number_forms(sample, tokenize(sample))
+    if not {"111.9", "15.00", "1019"} <= forms:
         errors.append(f"number forms miss Vision's readings: {sorted(forms)}")
     return errors
 
@@ -230,8 +236,17 @@ def check_zones() -> list[str]:
     return errors
 
 
+def check_markdown() -> list[str]:
+    """Footnote asterisks at a line start are escaped for Markdown; asterisks elsewhere stay."""
+    text = "Глюкоза 6.70 *\n* Примечание\n** Второе примечание\n| x | 1.5 * |"
+    expected = "Глюкоза 6.70 *\n\\* Примечание\n\\*\\* Второе примечание\n| x | 1.5 * |"
+    got = markdown_safe(text)
+    return [] if got == expected else [f"Markdown escaping gave {got!r}, expected {expected!r}"]
+
+
 def main() -> int:
-    errors: list[str] = check_corrections() + check_marks() + check_vision_forms() + check_zones()
+    errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_zones()
+                         + check_markdown())
     for case in CASES:
         errors += run_case(*case)
     for case in LAYOUT_CASES:
@@ -250,7 +265,7 @@ def main() -> int:
                 errors += run_case(f"{doc} p{entry['page']}", load_text(paths["read_a"]), load_text(paths["read_b"]), exact=False)
     for error in errors:
         print("FAIL", error)
-    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 4} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
+    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 5} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
     return 1 if errors else 0
 
 

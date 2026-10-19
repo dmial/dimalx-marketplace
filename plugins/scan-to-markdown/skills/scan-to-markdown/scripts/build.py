@@ -5,8 +5,10 @@ The final text is reader A's transcription with exactly the edits the arbiter de
 this script, and then the reviewer's corrections: every character outside those places stays as
 reader A wrote it. Pages with missing or invalid decisions or corrections are reported, and their
 document is not written. A written document goes to documents/ as <name>.md, and its scan moves
-there from the inbox, so the two lie side by side. The review data also carries what the readers
-and the arbiter noted about each page.
+there from the inbox, so the two lie side by side. In that file an asterisk that starts a line
+gets a backslash, so Markdown shows it instead of starting a list; the page text and the
+reviewer's marks stay as they are. The review data also carries what the readers and the arbiter
+noted about each page.
 
 Usage: python3 build.py [DOC ...]   (from the project folder)
 """
@@ -434,6 +436,16 @@ def made_by_this_tool(path: Path) -> bool:
     return f'transcribed_by: "{TOOL} ' in head or "transcription_pipeline:" in head
 
 
+LINE_START_STARS = re.compile(r"^( {0,3})(\*+)", re.MULTILINE)
+
+
+def markdown_safe(page_text: str) -> str:
+    """A page text as written into the Markdown file. An asterisk that starts a line, as in the
+    footnote "* Примечание", gets a backslash: Markdown would take the line for a list item and
+    drop the sign."""
+    return LINE_START_STARS.sub(lambda m: m.group(1) + "\\*" * len(m.group(2)), page_text)
+
+
 def render_markdown(meta: dict, pages: list[dict], config: dict) -> str:
     """The lasting document. Its properties describe the document, not the tool: only
     `transcribed_by` and `transcription_log` say how it was made."""
@@ -471,7 +483,7 @@ def render_markdown(meta: dict, pages: list[dict], config: dict) -> str:
     for p in pages:
         if len(pages) > 1:
             lines += [f"## Страница {p['page']}", ""]
-        lines += [p["final"].rstrip("\n"), ""]
+        lines += [markdown_safe(p["final"]).rstrip("\n"), ""]
     return "\n".join(lines)
 
 

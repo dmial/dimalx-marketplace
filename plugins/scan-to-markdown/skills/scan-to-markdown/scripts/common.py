@@ -317,13 +317,24 @@ def decimal_joins(text: str, tokens: list[Token], k: int) -> set[str]:
     return joins
 
 
+def power_joins(text: str, tokens: list[Token], k: int) -> set[str]:
+    """A power in a unit as Vision may read it, with the caret taken for a "1": "10^9" as "1019"."""
+    joins = set()
+    for i, j in ((k - 1, k), (k, k + 1)):
+        if 0 <= i and j < len(tokens) and tokens[i].kind == tokens[j].kind == "num" \
+                and text[tokens[i].end:tokens[j].start] == "^":
+            joins.add(f"{tokens[i].norm}1{tokens[j].norm}")
+    return joins
+
+
 def number_forms(text: str, tokens: list[Token]) -> set[str]:
     """Every way the numbers of a text can show up in Vision's reading: as written, joined over a
-    decimal comma with a space, and codes such as "I25.1" with look-alike letters read as digits."""
+    decimal comma with a space, a power "10^9" as "1019", and codes such as "I25.1" with look-alike
+    letters read as digits."""
     forms = {t.norm for t in tokens if t.kind == "num" or t.raw[0] in SUPERSCRIPTS}
     for k, tok in enumerate(tokens):
         if tok.kind == "num":
-            forms |= decimal_joins(text, tokens, k)
+            forms |= decimal_joins(text, tokens, k) | power_joins(text, tokens, k)
             code = glued_code(text, tok)
             if code and re.fullmatch(r"[\d.]+", code):
                 forms.add(code)
@@ -432,13 +443,14 @@ def vision_support(ocr: dict[str, Any], text: str, tokens: list[Token], k: int, 
     """Does Vision show the number tokens[k] of text at the same place on the page?
 
     The number counts in any form Vision may give it: "3, 24" also as "3,24", the "3" of "СТ3" also
-    as "СТЗ". The place is the height of the token's line, estimated from other tokens of that line
-    that Vision saw exactly once; failing that, from nearby tokens. Only when the place cannot be
-    estimated at all does any occurrence on the page count.
+    as "СТЗ", the "10" and the "9" of "10^9" also as "1019". The place is the height of the token's
+    line, estimated from other tokens of that line that Vision saw exactly once; failing that, from
+    nearby tokens. Only when the place cannot be estimated at all does any occurrence on the page
+    count.
     """
     tok = tokens[k]
     observations = ocr["observations"]
-    forms = {tok.norm} | decimal_joins(text, tokens, k)
+    forms = {tok.norm} | decimal_joins(text, tokens, k) | power_joins(text, tokens, k)
     code = glued_code(text, tok)
     hits = [o for o in observations if forms & o["norms"] or code is not None and code in o["codes"]]
     if not hits:

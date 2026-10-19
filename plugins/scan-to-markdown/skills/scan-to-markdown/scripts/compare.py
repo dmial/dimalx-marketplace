@@ -14,8 +14,9 @@ Kinds of discrepancies:
   vision_extra          Vision found a number that neither A nor B has
 Vision checks skip service information (stamps, requisites, certificates, footers): two agreeing
 readers are enough there. A number counts as seen in any form Vision gives it: "3, 24" as "3,24",
-"I25.1" as "125.1", the "3" of "СТ3" as "СТЗ". Every discrepancy has a zone, "service" when both
-readers' text there is service information: the arbiter decides those with a quick look.
+"I25.1" as "125.1", the "3" of "СТ3" as "СТЗ", "10^9" as "1019". Every discrepancy has a zone,
+"service" when both readers' text there is service information: the arbiter decides those with a
+quick look.
 
 A discrepancy that touches a bracketed group such as [от руки: ✓], [печать: …] or (?) always
 covers the whole group on both sides, so choosing one reader's variant replaces whole groups.
@@ -515,7 +516,8 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
         })
 
     # Numbers that Vision saw but neither reader wrote: possible omissions by both. A reading such
-    # as "3,24" for "3, 24" or "125.1" for "I25.1" is no omission; service lines are not checked.
+    # as "3,24" for "3, 24", "125.1" for "I25.1" or "1019" for "10^9" is no omission; service lines
+    # are not checked.
     ab_nums = number_forms(a.text, a.tokens) | number_forms(b.text, b.tokens)
     for obs in observations:
         missing = [num for num in obs["best_numbers"] if num not in ab_nums and not any(num in other for other in ab_nums)]
