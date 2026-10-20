@@ -302,6 +302,33 @@ def load_ocr(path: Path) -> dict[str, Any]:
     return data
 
 
+SURE = 0.5  # Vision's confidence in a line it read surely; below it, many lines are misread
+TURNED_MIN_CHARS = 80  # text printed the other way up that makes a block, not a few words of a stamp
+
+
+def facing(obs: dict[str, Any]) -> int | None:
+    """1 for a line upright on the page, -1 for one upside down, None for one at a slant."""
+    angle = abs(obs["angle"])
+    return 1 if angle <= 30 else -1 if angle >= 150 else None
+
+
+def turned_lines(first: list[dict[str, Any]], second: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lines of a block printed the other way up, from Vision's second reading of a page (`second`)
+    on which the lines of its first reading (`first`) that it read surely were painted white.
+
+    Vision reads a page in one orientation, the one most of its text has, so a block printed upside
+    down stays unread or reads as gibberish. On the painted page that block is most of the text. Of
+    the second reading, lines facing the other way from the page's text count if read surely and if
+    together they make a block: a few words of a stamp put upside down do not, and neither does a
+    line misread upside down ("25-37" as "LE-SZ"). Its other lines are the first reading again."""
+    faces = [facing(o) for o in first if o["confidence"] >= SURE]
+    page = 1 if faces.count(1) >= faces.count(-1) else -1
+    turned = [o for o in second if o["confidence"] >= SURE and facing(o) == -page]
+    if sum(len(o["text"]) for o in turned) < TURNED_MIN_CHARS:
+        return []
+    return [{**o, "turned": True} for o in turned]
+
+
 def code_form(run: str) -> str:
     return run.casefold().replace("ё", "е").translate(_HOMOGLYPHS).translate(_LOOKALIKE).replace(",", ".")
 
@@ -426,7 +453,8 @@ def locate(
     `spot` makes the estimate stricter. Only tokens printed on one line anchor it, so Vision's one
     reading of a word printed twice cannot pull the spot to the other place. On a known line, a find
     much taller than the line (a logo beside it) is not on it, and the whole line is as `line_box`
-    frames it. Without a known line, the spot lies between its nearest anchors, as `between` finds it.
+    frames it. Without a known line, the spot lies between its nearest anchors, as `between` finds it;
+    without anchors, within 15% of the page around the line's share of the text.
     """
     observations = ocr["observations"]
     line_height = ocr["line_height"]
@@ -461,9 +489,10 @@ def locate(
         ys = [center_y(o) for _, o in first + last]
         return None, (min(ys) + max(ys)) / 2, (min(ys), max(ys))
     y = fallback_ratio * height
-    hits = [o for o in observations if overlap(o)]
+    reach = 0.15 * height if spot is not None else 0
+    # Without anchors the place is the line's share of the text: a find far from it is another line.
+    hits = [o for o in observations if overlap(o) and (spot is None or abs(center_y(o) - y) <= reach)]
     if not hits:
-        reach = 0.15 * height if spot is not None else 0
         return None, y, (max(0, y - reach), min(height, y + reach))
     best = min(hits, key=lambda o: (-overlap(o), abs(center_y(o) - y)))
     return best["bbox"], center_y(best), (center_y(best), center_y(best))

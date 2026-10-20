@@ -26,7 +26,11 @@ func recognize(imagePath: String, outPath: String) throws {
         let candidates = observation.topCandidates(3)
         guard let best = candidates.first else { continue }
         let box = observation.boundingBox  // normalized, origin at bottom-left
+        // Direction of the line's top edge on the page, y down: 0 for upright text, ±180 upside down.
+        let (left, right) = (observation.topLeft, observation.topRight)
+        let angle = atan2(Double(left.y - right.y) * height, Double(right.x - left.x) * width) * 180 / .pi
         observations.append([
+            "angle": (angle * 10).rounded() / 10,
             "text": best.string,
             "confidence": (Double(best.confidence) * 1000).rounded() / 1000,
             "alternatives": candidates.dropFirst().map { $0.string },

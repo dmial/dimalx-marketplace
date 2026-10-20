@@ -21,6 +21,9 @@ Invariants:
     "1019" for "10^9";
   * Vision sees a number only at its place: a short number inside a code elsewhere does not move its line,
     a sample number repeated in every block counts in its own block only, a round stamp is one place;
+  * Vision's second reading of a page adds the lines of a block printed the other way up, and
+    nothing else: not its first reading again, not a line it is unsure of, not a few words of a
+    stamp put upside down;
   * stamps, logos and requisite lines fall into the service zone, test results do not;
   * in the Markdown file an asterisk that starts a line is escaped, so it is not taken for a list;
   * crops hold the spot: a stamp over its owner's printed name, a note in the margin, a row whose
@@ -28,7 +31,8 @@ Invariants:
     beside its line also has, a signature block above many footnote words and a page number, a
     check under table headers repeated down the page, depth marks beside a scan, a misread label
     at the start of a row, a line repeated in every block; and they leave out a logo at the height
-    of a line Vision read, and the text far below a stamp.
+    of a line Vision read, the text far below a stamp, and a line Vision read that has a word of a
+    check in a block Vision did not read.
 A failure names the case and shows both texts only around the first place where they part.
 
 Usage: python3 selftest.py   (inside a project it also checks every page that has both readings)
@@ -51,6 +55,7 @@ from common import (  # noqa: E402
     page_paths,
     service_ranges,
     tokenize,
+    turned_lines,
     vision_support,
 )
 from compare import Text, diff_units, edit_for_unit, looked_for, place, place_check  # noqa: E402
@@ -357,6 +362,35 @@ def check_vision_places() -> list[str]:
     return errors
 
 
+def check_turned() -> list[str]:
+    """Lines Vision read on a copy of a page with its surely read lines painted white: those of a
+    block facing the other way join the OCR, also on a page that is upside down itself."""
+    def line(text: str, angle: float, confidence: float = 1.0) -> dict:
+        return {"text": text, "angle": angle, "confidence": confidence, "bbox": [100, 100, 600, 30]}
+
+    def turned(lines: list[dict]) -> list[dict]:
+        return [{**o, "angle": o["angle"] + 180 if o["angle"] < 0 else o["angle"] - 180} for o in lines]
+
+    page = [line("Жалобы: кашель", 0.0), line("Осмотр: без особенностей", 1.5), line("Пульс 70", -0.8, 0.5)]
+    again = [line("Пульс 70", 0.4, 0.5), line("Осмотр", 2.0, 0.3)]
+    block = [line("Назначения: сироп по 5 мл 3 раза в день", -178.2), line("Повторный приём через 2 недели", 179.4, 0.5),
+             line("Врач-терапевт Иванова А. А.", -177.9)]
+    stamp = [line("ДЛЯ ДОКУМЕНТОВ", 176.0, 0.5), line("Республика", 180.0, 0.5)]
+    unsure = [line("LE-SZ", 180.0, 0.3)]
+    slanted = [line("ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ", 65.0)]
+    errors = []
+    for name, first, second, expected in [
+        ("a block printed upside down", page, again + block + unsure + slanted, block),
+        ("no such block", page, again + unsure, []),
+        ("a stamp put upside down", page, again + stamp + unsure, []),
+        ("a page upside down with an upright block", turned(page), turned(again) + turned(block), turned(block)),
+    ]:
+        got = turned_lines(first, second)
+        if [o["text"] for o in got] != [o["text"] for o in expected] or not all(o.get("turned") for o in got):
+            errors.append(f"turned lines of «{name}»: {[o['text'] for o in got]}, expected {[o['text'] for o in expected]}")
+    return errors
+
+
 def check_zones() -> list[str]:
     errors = []
     text = ("| Показатель | 4.87 | (3.5 - 5.0) |\n"
@@ -454,6 +488,8 @@ def check_places() -> list[str]:
     samples_seen = []
     for y, name in ((200, "альфа"), (600, "бета"), (1000, "гамма")):
         samples_seen += [(f"Тест {name}", 100, y, 300), ("Проба № 5550001112, дата 01.01.2020", 100, y + 40, 700), ("Уровень", 100, y + 80, 150)]
+    unread = ("Жалобы на кашель в течение двух недель\nОсмотр: кожные покровы чистые, дыхание везикулярное\n"
+              "Живот мягкий, безболезненный, печень по краю реберной дуги\nНазначения: сироп 5 мл 3 раза в день 10 недель")
     samples_seen += [("1.10", 600, 280, 100), ("0.5 - 2.5", 900, 280, 150), ("низкий", 1200, 280, 120),
                      ("2.20", 600, 680, 100), ("<3", 900, 680, 50), ("3.30", 600, 1080, 100), ("<4", 900, 1080, 50)]
     for name, a_text, b_text, seen, fragment, spot, is_row, *away in [
@@ -495,6 +531,9 @@ def check_places() -> list[str]:
          "[печать", (700, 790, 1000, 990), False, (100, 1800, 800, 1830)),
         ("check of a line repeated in every block", samples, samples, samples_seen,
          "5550001112, дата 01.01.2020\n| Уровень | 2.20", (300, 645, 600, 665), True),
+        ("check in a block Vision did not read, a word of its line on a line Vision read", unread, unread,
+         [("Жалобы на кашель в течение двух недель", 100, 85, 700)], "10 недель", (900, 1735, 960, 1765), True,
+         (100, 85, 800, 115)),
     ]:
         found = where(a_text, b_text, seen, fragment)
         if not holds(found, spot, is_row):
@@ -523,8 +562,8 @@ def check_signs() -> list[str]:
 
 
 def main() -> int:
-    errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_vision_places() + check_zones()
-                         + check_markdown() + check_places() + check_signs() + check_rows())
+    errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_vision_places() + check_turned()
+                         + check_zones() + check_markdown() + check_places() + check_signs() + check_rows())
     for case in CASES:
         errors += run_case(*case)
     for case in LAYOUT_CASES:
@@ -543,7 +582,7 @@ def main() -> int:
                 errors += run_case(f"{doc} p{entry['page']}", load_text(paths["read_a"]), load_text(paths["read_b"]), exact=False)
     for error in errors:
         print("FAIL", error)
-    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 9} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
+    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 10} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
     return 1 if errors else 0
 
 

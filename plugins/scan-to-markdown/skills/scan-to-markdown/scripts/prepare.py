@@ -7,7 +7,8 @@ Without arguments processes every PDF in the inbox. Unchanged PDFs (same sha256)
 Writes (<log> is logs/scan-to-markdown):
   <log>/cache/pages/<doc>/p<N>.png        page image at the scan's native resolution (lossless)
   <log>/cache/strips/<doc>/p<N>_s<K>.png  overlapping horizontal strips for reader B
-  <log>/ocr/<doc>/p<N>.json               Apple Vision OCR (text + boxes)
+  <log>/ocr/<doc>/p<N>.json               Apple Vision OCR (text + boxes), with a block printed
+                                          the other way up read in a second pass
   <log>/manifest.json                     documents, pages, checksums, where each scan and result lives
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
 from common import (
@@ -29,17 +30,21 @@ from common import (
     INBOX,
     SKILL_DIR,
     CACHE,
+    SURE,
     load_config,
+    load_json,
     load_manifest,
     page_paths,
     rel,
     require_project,
     save_json,
     sha256_file,
+    turned_lines,
 )
 
 OCR_SRC = SKILL_DIR / "scripts" / "vision_ocr.swift"
-OCR_BIN = CACHE / "bin" / "vision_ocr" if CACHE else None
+# Named by its source: an updated vision_ocr.swift always gets its own build.
+OCR_BIN = CACHE / "bin" / f"vision_ocr-{sha256_file(OCR_SRC)[:12]}" if CACHE else None
 # Mean grey-level difference (0-255) above which the embedded image is not trusted to equal the page.
 RENDER_MISMATCH_LIMIT = 15
 
@@ -49,11 +54,37 @@ def run(cmd: list[str]) -> str:
 
 
 def ensure_ocr_binary() -> None:
-    if OCR_BIN.exists() and OCR_BIN.stat().st_mtime >= OCR_SRC.stat().st_mtime:
+    if OCR_BIN.exists():
         return
     OCR_BIN.parent.mkdir(parents=True, exist_ok=True)
     print("compiling Apple Vision OCR tool…")
     run(["swiftc", "-O", str(OCR_SRC), "-o", str(OCR_BIN)])
+
+
+def read_turned_text(pages: list[tuple[Path, Path]]) -> None:
+    """Add to each page's OCR the lines of a block printed the other way up (`turned_lines`).
+    Vision reads a page in the orientation most of its text has; it reads again a copy of the page
+    with the lines it read surely painted white, on which such a block is most of the text."""
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
+        jobs: list[str] = []
+        for n, (image_path, ocr_path) in enumerate(pages):
+            image = Image.open(image_path).convert("RGB")
+            draw = ImageDraw.Draw(image)
+            for obs in load_json(ocr_path)["observations"]:
+                if obs["confidence"] >= SURE:
+                    x, y, w, h = obs["bbox"]
+                    draw.rectangle((x - 4, y - 4, x + w + 4, y + h + 4), fill="white")
+            image.save(tmp / f"{n}.png")
+            jobs += [str(tmp / f"{n}.png"), str(tmp / f"{n}.json")]
+        run([str(OCR_BIN), *jobs])
+        for n, (_, ocr_path) in enumerate(pages):
+            ocr = load_json(ocr_path)
+            turned = turned_lines(ocr["observations"], load_json(tmp / f"{n}.json")["observations"])
+            if turned:
+                ocr["observations"] += turned
+                save_json(ocr_path, ocr)
+                print(f"{rel(ocr_path)}: {len(turned)} lines printed the other way up")
 
 
 def pdf_pages(pdf: Path) -> list[tuple[float, float]]:
@@ -141,6 +172,7 @@ def prepare_pdf(pdf: Path, config: dict, manifest: dict, force: bool) -> None:
         print(f"{doc} p{number}: {width}x{height}, {method}, {len(strips)} strips")
 
     run([str(OCR_BIN), *ocr_jobs])
+    read_turned_text([(page_paths(doc, p["page"])["image"], page_paths(doc, p["page"])["ocr"]) for p in pages])
     fields = name.groupdict() if name else {}
     manifest["documents"][doc] = {
         "pdf": rel(pdf),

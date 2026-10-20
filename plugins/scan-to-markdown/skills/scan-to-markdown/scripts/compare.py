@@ -21,12 +21,13 @@ readers are enough there. A number counts as seen in any form Vision gives it: "
 quick look.
 
 Crops show the spot. Where Vision shows its tokens (or, for printed text, its line), a row with the
-spot framed and a close-up; otherwise a band of the page with the spot inside, taller for stamps,
-signatures and pictures. Words of stamps and handwritten notes are never looked up in Vision's
-text, and only printed tokens the text has on one line anchor a line: the doctor's name printed
-under her stamp, or a "12" inside a certificate number, cannot pull a crop to another place. A spot
-whose line Vision does not show lies between the nearest such anchors before and after it, so that
-neither a footnote far below nor table headers repeated down the page can pull its crop away.
+spot framed and a close-up, where a number only Vision has is framed too; otherwise a band of the
+page with the spot inside, taller for stamps, signatures and pictures. Words of stamps and
+handwritten notes are never looked up in Vision's text, and only printed tokens the text has on one
+line anchor a line: the doctor's name printed under her stamp, or a "12" inside a certificate
+number, cannot pull a crop to another place. A spot whose line Vision does not show lies between
+the nearest such anchors before and after it, so that neither a footnote far below nor table
+headers repeated down the page can pull its crop away.
 
 Table cell borders are matched by their place in the line too: a border that opens a line only
 with one that opens a line, a border that closes it only with one that closes it. A row one reader
@@ -547,9 +548,10 @@ class Cropper:
         for old in out_dir.glob(f"p{page}_*.png"):
             old.unlink()
 
-    def save(self, item_id: str, bbox: list[float] | None, span: tuple[float, float], row_only: bool = False) -> list[str]:
-        """With a box: the row (box framed) and, unless row_only, a close-up; without: the band
-        between the estimated top and bottom of the spot."""
+    def save(self, item_id: str, bbox: list[float] | None, span: tuple[float, float], row_only: bool = False,
+             framed_zoom: bool = False) -> list[str]:
+        """With a box: the row (box framed) and, unless row_only, a close-up, framed too if
+        framed_zoom; without: the band between the estimated top and bottom of the spot."""
         width, height = self.image.size
         paths = []
         if bbox and row_only:
@@ -567,12 +569,13 @@ class Cropper:
             ImageDraw.Draw(row).rectangle((x - 6, y - top - 6, x + w + 6, y - top + h + 6), outline=(220, 30, 30), width=3)
             paths.append(self._write(row, f"p{self.page}_{item_id}_row.png"))
             pad_x, pad_y = max(3 * line_h, 80), 1.5 * line_h
-            zoom = self.image.crop((
-                max(0, round(x - pad_x)), max(0, round(y - pad_y)),
-                min(width, round(x + w + pad_x)), min(height, round(y + h + pad_y)),
-            ))
+            left, upper = max(0, round(x - pad_x)), max(0, round(y - pad_y))
+            zoom = self.image.crop((left, upper, min(width, round(x + w + pad_x)), min(height, round(y + h + pad_y))))
             scale = min(3.0, MAX_EDGE / max(zoom.size))
             zoom = zoom.resize((round(zoom.width * scale), round(zoom.height * scale)), Image.Resampling.LANCZOS)
+            if framed_zoom:
+                ImageDraw.Draw(zoom).rectangle(((x - 6 - left) * scale, (y - 6 - upper) * scale, (x + w + 6 - left) * scale,
+                                                (y + h + 6 - upper) * scale), outline=(220, 30, 30), width=3)
             paths.append(self._write(zoom, f"p{self.page}_{item_id}_zoom.png"))
         else:
             top = max(0, round(min(span[0] - 60, (span[0] + span[1]) / 2 - 90)))
@@ -801,7 +804,8 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
             "vision": {"text": obs["text"], "missing_numbers": missing},
             "zone": "content",
             "bbox": obs["bbox"],
-            "crops": cropper.save(item_id, obs["bbox"], (y + h / 2, y + h / 2)),
+            # The close-up of a stamp or a table holds many numbers: the frame shows which marks Vision read.
+            "crops": cropper.save(item_id, obs["bbox"], (y + h / 2, y + h / 2), framed_zoom=True),
         })
 
     kinds = Counter(d["kind"] for d in discrepancies)
