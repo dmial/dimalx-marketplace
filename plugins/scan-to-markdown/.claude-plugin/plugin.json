@@ -1,6 +1,6 @@
 {
   "name": "scan-to-markdown",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Verbatim transcription of scanned paper documents (medical records, contracts, invoices and the like) into Markdown: two independent model readings, code comparison against Apple Vision OCR, an arbiter for disputed spots, and a local review page where a person verifies pages and leaves corrections.",
   "author": {
     "name": "Dmitry Alekseev",
