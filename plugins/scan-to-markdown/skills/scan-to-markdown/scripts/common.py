@@ -255,6 +255,24 @@ def tokenize(text: str) -> list[Token]:
     return tokens
 
 
+def alignment_keys(text: str, tokens: list[Token]) -> list[str]:
+    """What the tokens of two readings are matched by: the norm, and for a cell border also whether
+    it opens or closes its line. The border that closes one table row is then never matched with the
+    one that opens the next, so a row one reader wrote without its last border ("| 5.1" against
+    "| 5.1 |") differs in that border, not in the first border of the next row."""
+    keys = []
+    for tok in tokens:
+        if tok.kind != "cell":
+            keys.append(tok.norm)
+            continue
+        line_start = text.rfind("\n", 0, tok.start) + 1
+        line_end = text.find("\n", tok.end)
+        opens = not text[line_start:tok.start].strip()
+        closes = not text[tok.end:line_end if line_end >= 0 else len(text)].strip()
+        keys.append("|" + "<" * opens + ">" * closes)
+    return keys
+
+
 # --- Apple Vision OCR -------------------------------------------------------
 
 def load_ocr(path: Path) -> dict[str, Any]:

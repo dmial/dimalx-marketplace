@@ -9,7 +9,12 @@ Invariants:
     differ in spacing there);
   * a colon, bracket or minus that differs between agreed words is a discrepancy of its own; next
     to a differing word it joins that discrepancy; choosing B there keeps A's words;
-  * any mix of choices keeps every table row whole;
+  * any mix of choices keeps every table row whole: each line with a cell border is built like some
+    line of A or B (a "|" at its start or not, at its end or not, as many "|"). Every mix is tried on
+    up to ten discrepancies; beyond that, every mix of each four neighbouring ones, the others all A
+    or all B, so B everywhere is always among them;
+  * a border only one reader wrote at the end of a row stays with that row, not with the next;
+  * build.py takes for agreed exactly the tokens compare.py matched;
   * a reviewer's correction replaces exactly its fragment and moves later marks along;
   * an unreadable number inside an uncertainty mark ([?4]) gets no second mark;
   * Vision's forms of a number count as seeing it: "3,24" for "3, 24", "СТЗ" for "СТ3", "125.1" for "I25.1",
@@ -29,7 +34,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
-from build import Edit, apply_corrections, apply_edits, markdown_safe, plan_edits  # noqa: E402
+from build import Edit, agreed_ranges, apply_corrections, apply_edits, markdown_safe, plan_edits  # noqa: E402
 from common import (  # noqa: E402
     ROOT,
     codes,
@@ -94,6 +99,14 @@ CASES = [
     ("minus only in A in a table", "| Показатель | -2.1 | ммоль/л |", "| Показатель | 2.1 | ммоль/л |"),
     ("minus only in B", "Ось 30°", "Ось -30°"),
     ("minus and a misread number in one row", "| Показатель | -2.1 | 4.87 |", "| Показатель | 2.1 | 4.82 |"),
+    ("last border of a row only in A", "| Глюкоза | 5.1 |\n| Белок | 70 |", "| Глюкоза | 5.1\n| Белок | 70 |"),
+    ("last border of a row only in B", "| Глюкоза | 5.1\n| Белок | 70 |", "| Глюкоза | 5.1 |\n| Белок | 70 |"),
+    ("first border of a row only in A", "| Глюкоза | 5.1 |\n| Белок | 70 |", "| Глюкоза | 5.1 |\nБелок | 70 |"),
+    ("last border only in A, next row misread", "| Глюкоза | 5.1 |\n| Белок | 70 |", "| Глюкоза | 5.1\n| Белок | 72 |"),
+    ("separator row one border short in B", "| Показатель | Значение |\n|---|---|\n| Глюкоза | 5.1 |",
+     "| Показатель | Значение |\n|---|---\n| Глюкоза | 5.1 |"),
+    ("separator row one border short in A", "| Показатель | Значение |\n|---|---\n| Глюкоза | 5.1 |",
+     "| Показатель | Значение |\n|---|---|\n| Глюкоза | 5.1 |"),
 ]
 # Cases where line breaks legitimately stay as in A, so B is matched by structure, not character by character.
 LAYOUT_CASES = [
@@ -118,6 +131,8 @@ def squeeze(text: str) -> str:
 
 
 STRUCTURE_RE = re.compile(r"[\[\]:*]|(?<![\w.,])[-−–](?=\d)")  # a minus right before a number, not in "5-10"
+MIX_ALL = 10  # up to this many discrepancies on a page the row check tries every mix of choices
+MIX_RUN = 4  # beyond, every mix of each run of this many neighbouring discrepancies
 
 
 def structure(text: str) -> list[tuple[int, str]]:
@@ -149,29 +164,58 @@ def structure_difference(got: str, expected: str) -> str | None:
     return f"{item(a)} where text B has {item(b)}: got «{excerpt(got, pos_a)}», expected «{excerpt(expected, pos_b)}»"
 
 
+def row_shapes(text: str) -> set[tuple[bool, bool, int]]:
+    """How each line with a cell border is built: whether a "|" opens it, whether one closes it, and
+    how many "|" it has."""
+    lines = [line.strip() for line in text.split("\n")]
+    return {(line.startswith("|"), line.endswith("|"), line.count("|")) for line in lines if "|" in line}
+
+
+def mixes(count: int) -> list[int]:
+    """The mixes of choices to try, as bit masks (bit n set: B for discrepancy n): every mix up to
+    MIX_ALL discrepancies; beyond, every mix of each MIX_RUN neighbouring ones, the others all A or
+    all B. So every discrepancy is tried with each choice next to each choice of its neighbours,
+    and B everywhere is among the mixes."""
+    if count <= MIX_ALL:
+        return list(range(2 ** count))
+    runs = {m << start for start in range(count - MIX_RUN + 1) for m in range(2 ** MIX_RUN)}
+    return sorted(runs | {((1 << count) - 1) ^ m for m in runs})
+
+
+def broken_row(a_text: str, b_text: str, edits: list[dict]) -> str | None:
+    """The first mix of choices that gives a line with cell borders built as no line of A or B is
+    (another number of "|", a row that lost its first or last "|"), with that line; None if every
+    mix keeps table rows whole."""
+    allowed = row_shapes(a_text) | row_shapes(b_text)
+    for mask in mixes(len(edits)):
+        mixed = [
+            Edit(e["a_span"][0], e["a_span"][1], e["b_text"] if mask >> n & 1 else a_text[e["a_span"][0]:e["a_span"][1]], "resolved", f"u{n}")
+            for n, e in enumerate(edits)
+        ]
+        final_mix, _, _ = apply_edits(a_text, mixed, 1000, 1000)
+        wrong = next((line for line in final_mix.split("\n") if not row_shapes(line) <= allowed), None)
+        if wrong is not None:
+            choice = "".join("B" if mask >> n & 1 else "A" for n in range(len(edits)))
+            return f"choice {choice} broke a table row: «{wrong.strip()}»"
+    return None
+
+
 def run_case(name: str, a_text: str, b_text: str, exact: bool = True) -> list[str]:
     a, b = Text(a_text), Text(b_text)
-    units, _, _ = diff_units(a, b)
+    units, a2b, _ = diff_units(a, b)
     edits = [edit_for_unit(a, b, u) for u in units]
     errors = []
+    if agreed_ranges(a_text, b_text) != {(a.tokens[k].start, a.tokens[k].end) for k in a2b}:
+        errors.append(f"{name}: build.py takes other tokens for agreed than compare.py")
 
     keep_a = [Edit(e["a_span"][0], e["a_span"][1], a_text[e["a_span"][0]:e["a_span"][1]], "resolved", f"u{n}") for n, e in enumerate(edits)]
     final_a, _, problems = apply_edits(a_text, keep_a, 1000, 1000)
     if problems or final_a != a_text:
         errors.append(f"{name}: choosing A changed the text: {problems or repr(final_a)}")
 
-    # Any mix of choices must keep table rows whole: each row's number of cells as in A or in B.
-    allowed = {line.count("|") for line in (a_text + "\n" + b_text).split("\n") if line.lstrip().startswith("|")}
-    for mask in range(min(2 ** len(edits), 256)):
-        mixed = [
-            Edit(e["a_span"][0], e["a_span"][1], e["b_text"] if mask >> n & 1 else a_text[e["a_span"][0]:e["a_span"][1]], "resolved", f"u{n}")
-            for n, e in enumerate(edits)
-        ]
-        final_mix, _, _ = apply_edits(a_text, mixed, 1000, 1000)
-        rows = {line.count("|") for line in final_mix.split("\n") if line.lstrip().startswith("|")}
-        if not rows <= allowed:
-            errors.append(f"{name}: mixed choice {mask:b} broke a table row: {final_mix!r}")
-            break
+    broken = broken_row(a_text, b_text, edits)
+    if broken:
+        errors.append(f"{name}: {broken}")
 
     take_b = [Edit(e["a_span"][0], e["a_span"][1], e["b_text"], "resolved", f"u{n}") for n, e in enumerate(edits)]
     final_b, _, problems = apply_edits(a_text, take_b, 1000, 1000)
@@ -181,6 +225,24 @@ def run_case(name: str, a_text: str, b_text: str, exact: bool = True) -> list[st
         differs = structure_difference(final_b, b_text)
     if problems or differs:
         errors.append(f"{name}: choosing B does not give text B {differs or ''} {problems or ''}".rstrip())
+    return errors
+
+
+def check_rows() -> list[str]:
+    """The row check sees a row that lost its first border, and two rows joined by the last of
+    twelve discrepancies on a page; numbers changed in rows break nothing."""
+    errors = []
+    table = "| Глюкоза | 5.1 |\n| Белок | 70 |"
+    page = "".join(f"Показатель {n}: {n}.5\n" for n in range(1, 12)) + table
+    numbers = [{"a_span": [page.index(f"{n}.5"), page.index(f"{n}.5") + 3], "b_text": f"{n}.6"} for n in range(1, 12)]
+    joint = page.index("|\n| Белок")
+    for name, text, edits, expected in [
+        ("first border removed", table, [{"a_span": [table.index("| Белок"), table.index("Белок")], "b_text": ""}], True),
+        ("rows joined by the twelfth edit", page, numbers + [{"a_span": [joint, joint + 3], "b_text": "|"}], True),
+        ("numbers changed", page, numbers, False),
+    ]:
+        if (broken_row(text, text, edits) is not None) != expected:
+            errors.append(f"row check on «{name}»: expected {'a broken row' if expected else 'none'}")
     return errors
 
 
@@ -347,7 +409,7 @@ def check_signs() -> list[str]:
 
 def main() -> int:
     errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_zones()
-                         + check_markdown() + check_places() + check_signs())
+                         + check_markdown() + check_places() + check_signs() + check_rows())
     for case in CASES:
         errors += run_case(*case)
     for case in LAYOUT_CASES:
@@ -366,7 +428,7 @@ def main() -> int:
                 errors += run_case(f"{doc} p{entry['page']}", load_text(paths["read_a"]), load_text(paths["read_b"]), exact=False)
     for error in errors:
         print("FAIL", error)
-    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 7} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
+    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 8} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
     return 1 if errors else 0
 
 

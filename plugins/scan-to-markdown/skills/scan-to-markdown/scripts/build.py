@@ -31,6 +31,7 @@ from common import (
     LOG,
     MANIFEST_PATH,
     ROOT,
+    alignment_keys,
     distinctive,
     file_lock,
     in_ranges,
@@ -94,7 +95,7 @@ class Edit:
 def agreed_ranges(a_text: str, b_text: str) -> set[tuple[int, int]]:
     """Character ranges of tokens in text A that reader B wrote the same way (same diff as compare.py)."""
     a_tokens, b_tokens = tokenize(a_text), tokenize(b_text)
-    matcher = difflib.SequenceMatcher(None, [t.norm for t in a_tokens], [t.norm for t in b_tokens], autojunk=False)
+    matcher = difflib.SequenceMatcher(None, alignment_keys(a_text, a_tokens), alignment_keys(b_text, b_tokens), autojunk=False)
     return {
         (a_tokens[k].start, a_tokens[k].end)
         for tag, i1, i2, _, _ in matcher.get_opcodes() if tag == "equal" for k in range(i1, i2)

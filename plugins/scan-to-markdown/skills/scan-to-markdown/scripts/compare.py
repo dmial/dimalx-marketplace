@@ -26,6 +26,11 @@ signatures and pictures. Words of stamps and handwritten notes are never looked 
 text, and only printed tokens the text has once anchor a line: the doctor's name printed under her
 stamp, or a "12" inside a certificate number, cannot pull a crop to another place.
 
+Table cell borders are matched by their place in the line too: a border that opens a line only
+with one that opens a line, a border that closes it only with one that closes it. A row one reader
+wrote without its last border ("| 5.1" against "| 5.1 |") so differs in that border, and choosing
+B cannot move a border into the next row ("| | Белок | 70 |").
+
 A discrepancy that touches a bracketed group such as [от руки: ✓], [печать: …] or (?) always
 covers the whole group on both sides, so choosing one reader's variant replaces whole groups.
 Punctuation glued to the end of a discrepancy joins it when the readers differ there
@@ -61,6 +66,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
 from common import (
     Token,
+    alignment_keys,
     bracket_groups,
     code_version,
     comparison_id,
@@ -388,7 +394,9 @@ def edit_for_unit(a: Text, b: Text, u: Unit) -> dict:
     after = a.text[pos] if pos < len(a.text) else "\n"
     # A's punctuation right here that B has right after the new words ends them: no space before it.
     ends_them = a.glued(pos) != "" and a.glued(pos) == b.glued(u.eb)
-    inserted = ("" if before.isspace() else " ") + b.text[u.sb:u.eb] + ("" if after.isspace() or ends_them else " ")
+    # New words B glues to the sign both readers have before them follow it glued: "|---|---" gets "|".
+    glued_on = u.sb > 0 and before == b.text[u.sb - 1] and not before.isalnum()
+    inserted = ("" if before.isspace() or glued_on else " ") + b.text[u.sb:u.eb] + ("" if after.isspace() or ends_them else " ")
     return {"mode": "inline", "a_span": [pos, pos], "b_text": inserted}
 
 
@@ -588,7 +596,7 @@ def insertion_point(text: Text, i: int, other_starts_line: bool) -> int:
 
 def diff_units(a: Text, b: Text) -> tuple[list[Unit], dict[int, int], float]:
     """Discrepancies between A and B, grown to whole marks and merged where they touch."""
-    matcher = difflib.SequenceMatcher(None, [t.norm for t in a.tokens], [t.norm for t in b.tokens], autojunk=False)
+    matcher = difflib.SequenceMatcher(None, alignment_keys(a.text, a.tokens), alignment_keys(b.text, b.tokens), autojunk=False)
     opcodes = matcher.get_opcodes()
     a2b, b2a = {}, {}
     for tag, i1, i2, j1, j2 in opcodes:
