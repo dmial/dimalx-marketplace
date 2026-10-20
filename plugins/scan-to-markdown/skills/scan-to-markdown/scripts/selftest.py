@@ -12,7 +12,9 @@ Invariants:
   * Vision's forms of a number count as seeing it: "3,24" for "3, 24", "СТЗ" for "СТ3", "125.1" for "I25.1",
     "1019" for "10^9";
   * stamps, logos and requisite lines fall into the service zone, test results do not;
-  * in the Markdown file an asterisk that starts a line is escaped, so it is not taken for a list.
+  * in the Markdown file an asterisk that starts a line is escaped, so it is not taken for a list;
+  * crops hold the spot: a stamp over its owner's printed name, a note in the margin, a row whose
+    line a short number inside a code could take, a date on a line without words.
 A failure names the case and shows both texts only around the first place where they part.
 
 Usage: python3 selftest.py   (inside a project it also checks every page that has both readings)
@@ -37,7 +39,7 @@ from common import (  # noqa: E402
     tokenize,
     vision_support,
 )
-from compare import Text, diff_units, edit_for_unit  # noqa: E402
+from compare import Text, diff_units, edit_for_unit, looked_for, place, place_check  # noqa: E402
 
 # All sample data below is made up; none of it comes from real documents.
 CASES = [
@@ -250,9 +252,61 @@ def check_markdown() -> list[str]:
     return [] if got == expected else [f"Markdown escaping gave {got!r}, expected {expected!r}"]
 
 
+def check_places() -> list[str]:
+    """Crops hold the spot, on a made-up page 2000 px high with lines 30 px high. A spot is (x0, y0,
+    x1, y1) on the scan; a framed box must hold it, a row crop (vision checks) or a band must hold
+    its lines."""
+    errors = []
+
+    def where(a_text: str, b_text: str, seen: list[tuple[str, int, int, int]], fragment: str) -> tuple:
+        """compare.py's place of the discrepancy at `fragment` of A, or of that agreed number if none."""
+        ocr = {"observations": [{"text": t, "bbox": [x, y, w, 30], "norms": {k.norm for k in tokenize(t)}, "codes": codes(t)}
+                                for t, x, y, w in seen], "line_height": 30.0}
+        a, b = Text(a_text), Text(b_text)
+        start = a_text.index(fragment)
+        unit = next((u for u in diff_units(a, b)[0] if u.sa <= start < u.ea), None)
+        if unit:
+            interest, marks = looked_for(a, b, unit)
+            return place(a, ocr, 2000, interest, unit.i1, unit.i2, unit.sa, marks)
+        k = next(i for i, t in enumerate(a.tokens) if t.start == start)
+        return place_check(a, ocr, 2000, k, k + 1)
+
+    def holds(found: tuple, spot: tuple[int, int, int, int], row: bool) -> bool:
+        box, _, (top, bottom) = found
+        x0, y0, x1, y1 = spot
+        if box and not row:
+            return box[0] <= x0 and x1 <= box[0] + box[2] and box[1] <= y0 and y1 <= box[1] + box[3]
+        if box:
+            top, bottom = box[1] - 30, box[1] + box[3] + 30
+        return top - 45 <= y0 and y1 <= bottom + 45
+
+    stamp = "Заключение: без особенностей.\nВрач Петрова А.А. [печать: {} АННА ВРАЧ]\nДата 12.03.2024"
+    note = "ФИО Иванов И.И. Дата рождения: 01.01.1970 [от руки: вр. {}]\nВид оплаты ОМС"
+    row = "| Тироксин свободный | 12, 34 | пмоль/л | (9 - 19) |\n[штрихкод]"
+    dated = "Протокол исследования\nПротокол исследования\nот 05.06.2024\n\nПациент Иванов Возраст 54"
+    for name, a_text, b_text, seen, fragment, spot, is_row in [
+        ("stamp over its owner's printed name", stamp.format("ПЕТРОВА"), stamp.format("ПЕ[?Т]РОВА"),
+         [("Заключение: без особенностей.", 100, 885, 600), ("Врач Петрова А.А.", 100, 985, 300), ("Дата 12.03.2024", 100, 1085, 300)],
+         "[печать", (500, 880, 800, 1040), False),
+        ("handwritten note at the edge of a line", note.format("Петрова"), note.format("[?Петрова]"),
+         [("ФИО Иванов И.И.", 100, 285, 600), ("Дата рождения: 01.01.1970", 800, 285, 500), ("Вид оплаты ОМС", 500, 345, 400)],
+         "[от руки", (1400, 290, 1700, 330), False),
+        ("row and a short number inside a code", row, row,
+         [("12,34 пмоль/л", 900, 585, 300), ("0A12BC", 100, 1485, 300)],
+         "19", (1250, 590, 1300, 610), True),
+        ("date on a line without words", dated, dated,
+         [("Протокол исследования", 100, 85, 400), ("Пациент Иванов Возраст 54", 100, 1465, 600)],
+         "05.06.2024", (150, 1350, 400, 1370), True),
+    ]:
+        found = where(a_text, b_text, seen, fragment)
+        if not holds(found, spot, is_row):
+            errors.append(f"crop of «{name}» misses the spot {spot}: box {found[0]}, range {tuple(round(v) for v in found[2])}")
+    return errors
+
+
 def main() -> int:
     errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_zones()
-                         + check_markdown())
+                         + check_markdown() + check_places())
     for case in CASES:
         errors += run_case(*case)
     for case in LAYOUT_CASES:
@@ -271,7 +325,7 @@ def main() -> int:
                 errors += run_case(f"{doc} p{entry['page']}", load_text(paths["read_a"]), load_text(paths["read_b"]), exact=False)
     for error in errors:
         print("FAIL", error)
-    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 5} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
+    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 6} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
     return 1 if errors else 0
 
 

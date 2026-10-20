@@ -348,24 +348,26 @@ def center_y(obs: dict[str, Any]) -> float:
 
 def anchor_y(observations: list[dict[str, Any]], anchor_norms: list[str]) -> float | None:
     """Median height of nearby tokens that occur in exactly one OCR observation."""
-    ys = [center_y(o) for o in seen_once(observations, anchor_norms)]
+    ys = [center_y(o) for _, o in seen_once(observations, anchor_norms)]
     return statistics.median(ys) if ys else None
 
 
-def seen_once(observations: list[dict[str, Any]], norms: list[str]) -> list[dict[str, Any]]:
-    """For each token Vision saw in exactly one observation, that observation, in the order given."""
+def seen_once(observations: list[dict[str, Any]], norms: list[str]) -> list[tuple[str, dict[str, Any]]]:
+    """Each token Vision saw in exactly one observation, with that observation, in the order given."""
     found = []
     for norm in norms:
         hits = [o for o in observations if norm in o["norms"]]
         if len(hits) == 1:
-            found.append(hits[0])
+            found.append((norm, hits[0]))
     return found
 
 
-def one_line(observations: list[dict[str, Any]], tolerance: float) -> list[dict[str, Any]]:
-    """The largest group of the observations that lie on one line (centres within tolerance)."""
-    groups = [[o for o in observations if abs(center_y(o) - center_y(p)) <= tolerance] for p in observations]
-    return max(groups, key=len)
+def one_line(anchors: list[tuple[str, dict[str, Any]]], tolerance: float) -> list[dict[str, Any]]:
+    """Observations of the line most anchors point to (centres within tolerance); between lines with
+    as many anchors, the one with the longer anchors, so that a short number Vision found once inside
+    a code elsewhere ("ED12DE" for the "12" of "12, 34") does not outweigh a word of the line."""
+    groups = [[(n, o) for n, o in anchors if abs(center_y(o) - center_y(p)) <= tolerance] for _, p in anchors]
+    return [o for _, o in max(groups, key=lambda g: (len(g), sum(len(n) for n, _ in g)))]
 
 
 def union_box(observations: list[dict[str, Any]]) -> list[float]:
@@ -383,41 +385,59 @@ def locate(
     fallback_ratio: float,
     height: int,
     line_norms: list[str] | None = None,
+    whole_line: bool = True,
+    lines: tuple[int, dict[str, int]] | None = None,
 ) -> tuple[list[float] | None, float, tuple[float, float]]:
     """Where a spot is on the page: (OCR box or None, estimated y, estimated (top, bottom)), in pixels.
 
     If Vision saw other tokens of the spot's line exactly once, the line is known: the box is the
-    observation on that line with the tokens of interest, or else the whole line, never a line
-    elsewhere with the same word. Otherwise the place is estimated from nearby tokens that Vision
-    saw exactly once (`around`: before and after the spot, nearest first); without a box, the spot
-    lies between the nearest of them.
+    observation on that line with the tokens of interest, or else the whole line (no box unless
+    whole_line), never a line elsewhere with the same word. Otherwise the place is estimated from
+    nearby tokens that Vision saw exactly once (`around`: before and after the spot, nearest first);
+    without a box, the spot lies between the nearest of them.
+
+    `lines` (the spot's line, and the line of every token the text has once) makes the estimate
+    stricter: only such tokens anchor it, so Vision's one reading of a word printed twice cannot pull
+    the spot to the other place. With an anchor on one side only, the estimate reaches two line
+    heights past it for every line between it and the spot; with no anchor, 15% of the page each way.
     """
     observations = ocr["observations"]
+    line_height = ocr["line_height"]
+    if lines is not None:
+        spot, once = lines
+        line_norms = [n for n in line_norms or [] if n in once]
+        around = ([n for n in around[0] if n in once], [n for n in around[1] if n in once])
     overlap = lambda o: len(o["norms"] & interest)
     line_anchors = seen_once(observations, line_norms or [])
     if line_anchors:
-        line = one_line(line_anchors, ocr["line_height"])  # a word seen once elsewhere does not move the line
+        line = one_line(line_anchors, line_height)  # a word seen once elsewhere does not move the line
         y = statistics.median(center_y(o) for o in line)
-        hits = [o for o in observations if overlap(o) and abs(center_y(o) - y) <= ocr["line_height"]]
+        hits = [o for o in observations if overlap(o) and abs(center_y(o) - y) <= line_height]
         if hits:
             return min(hits, key=lambda o: (-overlap(o), abs(center_y(o) - y)))["bbox"], y, (y, y)
-        return union_box(line), y, (y, y)
+        return (union_box(line) if whole_line else None), y, (y, y)
     before, after = around
-    anchors = seen_once(observations, before + after)
+    anchors = [o for _, o in seen_once(observations, before + after)]
     if anchors:
         y = statistics.median(center_y(o) for o in anchors)
         hits = [o for o in observations if overlap(o) and abs(center_y(o) - y) <= 0.15 * height]
         if hits:
             return min(hits, key=lambda o: (-overlap(o), abs(center_y(o) - y)))["bbox"], y, (y, y)
-        nearest = [center_y(o) for o in seen_once(observations, before)[:1] + seen_once(observations, after)[:1]]
-        top, bottom = min(nearest), max(nearest)
-        if bottom - top > 0.25 * height:  # the text jumps to another block: trust the line before the spot
-            top = bottom = nearest[0]
+        first, last = seen_once(observations, before)[:1], seen_once(observations, after)[:1]
+        if first and last and abs(center_y(last[0][1]) - center_y(first[0][1])) > 0.25 * height:
+            last = []  # the text jumps to another block: trust the line before the spot
+        ys = [center_y(o) for _, o in first + last]
+        top, bottom = min(ys), max(ys)
+        if lines is not None and not (first and last):  # one side only: the spot may lie lines away
+            norm = (first or last)[0][0]
+            reach = 2 * line_height * (abs(spot - once[norm]) + 1)
+            top, bottom = (top, min(height, bottom + reach)) if first else (max(0, top - reach), bottom)
         return None, (top + bottom) / 2, (top, bottom)
     y = fallback_ratio * height
     hits = [o for o in observations if overlap(o)]
     if not hits:
-        return None, y, (y, y)
+        reach = 0.15 * height if lines is not None else 0
+        return None, y, (max(0, y - reach), min(height, y + reach))
     best = min(hits, key=lambda o: (-overlap(o), abs(center_y(o) - y)))
     return best["bbox"], center_y(best), (center_y(best), center_y(best))
 

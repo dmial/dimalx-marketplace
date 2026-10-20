@@ -18,6 +18,12 @@ readers are enough there. A number counts as seen in any form Vision gives it: "
 "service" when both readers' text there is service information: the arbiter decides those with a
 quick look.
 
+Crops show the spot. Where Vision shows its tokens (or, for printed text, its line), a row with the
+spot framed and a close-up; otherwise a band of the page with the spot inside, taller for stamps,
+signatures and pictures. Words of stamps and handwritten notes are never looked up in Vision's
+text, and only printed tokens the text has once anchor a line: the doctor's name printed under her
+stamp, or a "12" inside a certificate number, cannot pull a crop to another place.
+
 A discrepancy that touches a bracketed group such as [от руки: ✓], [печать: …] or (?) always
 covers the whole group on both sides, so choosing one reader's variant replaces whole groups.
 Punctuation glued to the end of a discrepancy joins it when the readers differ there
@@ -61,8 +67,6 @@ from common import (
     load_ocr,
     load_text,
     locate,
-    neighbour_norms,
-    neighbours,
     page_paths,
     rel,
     save_json,
@@ -77,6 +81,11 @@ DECIDABLE = {"number", "flag", "cells", "unsure", "text", "vision_check", "visio
 SEVERITY = {"moved": 0, "order": 1, "unsure": 2, "text": 3, "cells": 4, "flag": 5, "number": 6}
 ROW_MARGIN_LINES = 2.0  # how many line heights above and below the spot a row crop shows
 MAX_EDGE = 2000
+# Marks for what is not printed text. Vision does not show their words, and the same words printed
+# nearby (the doctor's name under her stamp) must not be taken for them.
+UNSEEN_MARKS = ("от руки", "подпись", "печать", "изображение", "логотип", "штрихкод", "qr-код")
+LARGE_MARKS = UNSEEN_MARKS[1:]  # stamps, signatures and pictures reach beyond the line they are written on
+LARGE_REACH = 0.12  # how far such a mark may reach from that line, as a share of the page height
 
 
 class Text:
@@ -87,6 +96,21 @@ class Text:
         self.tokens = tokenize(text)
         self.line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
         self.groups = bracket_groups(text)
+        self.marks = []  # (start, end, kind) of every mark for what is not printed text
+        for start, end in self.groups:
+            inner = text[start + 1:end - 1].lstrip("?").strip().casefold()
+            kind = next((m for m in UNSEEN_MARKS if inner.startswith(m)), None)
+            if text[start] == "[" and kind:
+                self.marks.append((start, end, kind))
+        self.token_marks = [next((k for s, e, k in self.marks if s <= t.start < e), None) for t in self.tokens]
+        printed = [t for t, mark in zip(self.tokens, self.token_marks) if mark is None]
+        counts = Counter(t.norm for t in printed)
+        self.printed_norms = set(counts)
+        self.once = {t.norm: t.line for t in printed if counts[t.norm] == 1}  # printed once, with its line
+
+    def printed(self, i1: int, i2: int) -> list[Token]:
+        """The tokens among tokens[i1:i2] that are printed text, not words of a stamp or a handwritten note."""
+        return [t for t, mark in zip(self.tokens[i1:i2], self.token_marks[i1:i2]) if mark is None]
 
     @property
     def line_count(self) -> int:
@@ -465,6 +489,58 @@ def diff_units(a: Text, b: Text) -> tuple[list[Unit], dict[int, int], float]:
     return take_glued_punctuation(merge_overlapping(units, a, b, a2b, b2a), a, b), a2b, matcher.ratio()
 
 
+def looked_for(a: Text, b: Text, u: Unit) -> tuple[set[str], set[str]]:
+    """What to look for in Vision's text to find a unit, and the kinds of marks it involves.
+
+    Printed tokens: the numbers that differ, else the words, else any of the unit. Words of a stamp
+    or a handwritten note are never looked for, as the same name printed nearby would be framed
+    instead; of such a mark, only a long number the page prints nowhere else is surely the mark.
+    """
+    ci1, ci2, cj1, cj2 = u.chunk
+    chunk_tokens = a.printed(ci1, ci2) + b.printed(cj1, cj2)
+    unit_tokens = a.printed(u.i1, u.i2) + b.printed(u.j1, u.j2)
+    interest = (
+        {t.norm for t in chunk_tokens if t.kind == "num"}
+        or {t.norm for t in chunk_tokens if t.kind == "word" and len(t.norm) >= 3}
+        or {t.norm for t in unit_tokens if t.kind == "num" or (t.kind == "word" and len(t.norm) >= 3)}
+        or {t.norm for t in a.tokens[ci1:ci2] + b.tokens[cj1:cj2]
+            if t.kind == "num" and len(t.norm) >= 4 and t.norm not in a.printed_norms | b.printed_norms}
+    )
+    return interest, {mark for mark in a.token_marks[u.i1:u.i2] + b.token_marks[u.j1:u.j2] if mark}
+
+
+def place(a: Text, ocr: dict, height: int, interest: set[str], i1: int, i2: int, start: int,
+          marks: set[str] = frozenset()) -> tuple[list[float] | None, float, tuple[float, float]]:
+    """Where a spot of text A is on the scan: (Vision's box or None, estimated y, (top, bottom)).
+
+    The box is where Vision shows the tokens of interest. Printed text without such tokens is boxed
+    by its whole line; a spot with marks for what is not printed text (a stamp, a handwritten note,
+    a picture) gets no box but the range it lies in, so that its crop is a band of the page with
+    the spot inside. The line comes from printed tokens that the text has once and Vision saw
+    once, never from words of such marks. Stamps, signatures and pictures reach beyond the line they
+    are written on: their range grows by LARGE_REACH of the page height each way.
+    """
+    line = a.line_of(start)
+    anchor = lambda k: distinctive(a.tokens[k]) and a.token_marks[k] is None
+    # Text only B has is printed where B saw it, not necessarily on A's line at the insertion point.
+    same_line = [a.tokens[k].norm for k in range(len(a.tokens)) if a.tokens[k].line == line and not i1 <= k < i2 and anchor(k)] if i1 < i2 else []
+    before = [a.tokens[k].norm for k in range(i1 - 1, -1, -1) if anchor(k)][:12]
+    after = [a.tokens[k].norm for k in range(i2, len(a.tokens)) if anchor(k)][:12]
+    box, y, (top, bottom) = locate(ocr, interest, (before, after), (line + 0.5) / a.line_count, height, same_line,
+                                   whole_line=not marks, lines=(line, a.once))
+    if box is None and marks & set(LARGE_MARKS):
+        top, bottom = max(0, top - LARGE_REACH * height), min(height, bottom + LARGE_REACH * height)
+    return box, y, (top, bottom)
+
+
+def place_check(a: Text, ocr: dict, height: int, i1: int, i2: int) -> tuple[list[float] | None, float, tuple[float, float]]:
+    """Where numbers tokens[i1:i2] that both readers agree on and Vision did not see are: their line
+    is found by its own printed words; a line without them gets a band, never a neighbour's box."""
+    line = a.tokens[i1].line
+    words = {t.norm for t in a.printed(0, len(a.tokens)) if t.line == line and t.kind == "word" and len(t.norm) >= 3}
+    return place(a, ocr, height, words, i1, i2, a.tokens[i1].start)
+
+
 def compare_page(doc: str, entry: dict, version: str) -> dict:
     page = entry["page"]
     paths = page_paths(doc, page)
@@ -478,12 +554,6 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
     height = entry["height"]
     cropper = Cropper(paths["image"], paths["crops_dir"], page)
 
-    def where(interest: set[str], i1: int, i2: int, start: int) -> tuple[list[float] | None, float, tuple[float, float]]:
-        line = a.line_of(start)
-        # Text only B has is printed where B saw it, not necessarily on A's line at the insertion point.
-        same_line = [t.norm for k, t in enumerate(a.tokens) if t.line == line and not i1 <= k < i2 and distinctive(t)] if i1 < i2 else []
-        return locate(ocr, interest, neighbours(a.tokens, i1, i2), (line + 0.5) / a.line_count, height, same_line)
-
     units, a2b, similarity = diff_units(a, b)
     a_service, b_service = service_ranges(a.text), service_ranges(b.text)
 
@@ -495,14 +565,7 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
 
     entries: list[tuple[int, dict]] = []
     for u in units:
-        ci1, ci2, cj1, cj2 = u.chunk
-        chunk_tokens = a.tokens[ci1:ci2] + b.tokens[cj1:cj2]
-        unit_tokens = a.tokens[u.i1:u.i2] + b.tokens[u.j1:u.j2]
-        interest = (
-            {t.norm for t in chunk_tokens if t.kind == "num"}
-            or {t.norm for t in chunk_tokens if t.kind == "word" and len(t.norm) >= 3}
-            or {t.norm for t in unit_tokens if t.kind == "num" or (t.kind == "word" and len(t.norm) >= 3)}
-        )
+        interest, marks = looked_for(a, b, u)
         entries.append((u.sa, {
             "kind": u.kind,
             "a": side(a, u.sa, u.ea),
@@ -512,7 +575,7 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
                 "a_numbers": {a.tokens[k].raw: vision_support(ocr, a.text, a.tokens, k, height) for k in range(u.i1, u.i2) if a.tokens[k].kind == "num"},
                 "b_numbers": {b.tokens[k].raw: vision_support(ocr, b.text, b.tokens, k, height) for k in range(u.j1, u.j2) if b.tokens[k].kind == "num"},
             },
-            "_where": where(interest, u.i1, u.i2, u.sa),
+            "_where": place(a, ocr, height, interest, u.i1, u.i2, u.sa, marks),
             "zone": zone(u),
         }))
 
@@ -532,14 +595,13 @@ def compare_page(doc: str, entry: dict, version: str) -> dict:
     for i1, i2 in checks:
         start, end = a.tokens[i1].start, a.tokens[i2 - 1].end
         j1, j2 = a2b[i1], a2b[i2 - 1] + 1
-        line_words = {t.norm for t in a.tokens if t.line == a.tokens[i1].line and t.kind == "word" and len(t.norm) >= 3}
         entries.append((start, {
             "kind": "vision_check",
             "a": side(a, start, end),
             "b": side(b, b.tokens[j1].start, b.tokens[j2 - 1].end),
             "edit": {"mode": "inline", "a_span": [start, end], "b_text": b.text[b.tokens[j1].start:b.tokens[j2 - 1].end]},
             "vision": {"a_numbers": {a.tokens[k].raw: False for k in range(i1, i2)}, "b_numbers": {}},
-            "_where": where(line_words or set(neighbour_norms(a.tokens, i1, i2)), i1, i2, start),
+            "_where": place_check(a, ocr, height, i1, i2),
             "zone": "content",
         }))
 
