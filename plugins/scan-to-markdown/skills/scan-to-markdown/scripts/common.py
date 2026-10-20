@@ -12,6 +12,7 @@ import re
 import statistics
 import threading
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -364,12 +365,6 @@ def center_y(obs: dict[str, Any]) -> float:
     return y + h / 2
 
 
-def anchor_y(observations: list[dict[str, Any]], anchor_norms: list[str]) -> float | None:
-    """Median height of nearby tokens that occur in exactly one OCR observation."""
-    ys = [center_y(o) for _, o in seen_once(observations, anchor_norms)]
-    return statistics.median(ys) if ys else None
-
-
 def seen_once(observations: list[dict[str, Any]], norms: list[str]) -> list[tuple[str, dict[str, Any]]]:
     """Each token Vision saw in exactly one observation, with that observation, in the order given."""
     found = []
@@ -538,20 +533,33 @@ def neighbours(tokens: list[Token], i1: int, i2: int, count: int = 6) -> tuple[l
     return before, after
 
 
-def neighbour_norms(tokens: list[Token], i1: int, i2: int, count: int = 6) -> list[str]:
-    """Distinctive tokens around tokens[i1:i2] (numbers and words of 4+ letters)."""
-    before, after = neighbours(tokens, i1, i2, count)
-    return before + after
+def anchor_forms(text: str, tokens: list[Token], i: int, skip: int = -1) -> list[str]:
+    """The forms in which Vision may show token i, if it is distinctive: as written, and a number
+    joined with its neighbour over a decimal comma with a space or a caret ("13, 4" as "13.4",
+    "10^9" as "1019"), but not with tokens[skip], the number being looked for."""
+    tok = tokens[i]
+    if not distinctive(tok):
+        return []
+    joins = set()
+    if tok.kind == "num":
+        joins = decimal_joins(text, tokens, i) | power_joins(text, tokens, i)
+        if abs(i - skip) == 1:
+            joins -= decimal_joins(text, tokens, skip) | power_joins(text, tokens, skip)
+    return [tok.norm, *sorted(joins - {tok.norm})]
 
 
 def vision_support(ocr: dict[str, Any], text: str, tokens: list[Token], k: int, height: int) -> bool:
     """Does Vision show the number tokens[k] of text at the same place on the page?
 
     The number counts in any form Vision may give it: "3, 24" also as "3,24", the "3" of "СТ3" also
-    as "СТЗ", the "10" and the "9" of "10^9" also as "1019". The place is the height of the token's
-    line, estimated from other tokens of that line that Vision saw exactly once; failing that, from
-    nearby tokens. Only when the place cannot be estimated at all does any occurrence on the page
-    count.
+    as "СТЗ", the "10" and the "9" of "10^9" also as "1019". The place comes from anchors: other
+    tokens printed on one line of the text that Vision saw in exactly one observation, in any of
+    their forms ("13, 4" as "13,4"). With anchors on the token's own line, the place is the height
+    most of them agree on, give or take 2.5 line heights: a "13" seen once in a code elsewhere does
+    not move it, the pieces of a round stamp do not split it. Otherwise it is the stretch between the
+    nearest anchor before the token and the nearest one after it, however far, give or take 5% of the
+    page; with an anchor on one side only, the stretch reaches two line heights past it for every
+    line between. Only a text without anchors lets any occurrence on the page count.
     """
     tok = tokens[k]
     observations = ocr["observations"]
@@ -560,15 +568,40 @@ def vision_support(ocr: dict[str, Any], text: str, tokens: list[Token], k: int, 
     hits = [o for o in observations if forms & o["norms"] or code is not None and code in o["codes"]]
     if not hits:
         return False
-    same_line = [t.norm for i, t in enumerate(tokens) if i != k and t.line == tok.line and distinctive(t)]
-    y = anchor_y(observations, same_line)
-    tolerance = 2.5 * ocr["line_height"]
-    if y is None:
-        y = anchor_y(observations, neighbour_norms(tokens, k, k + 1))
-        tolerance = 0.05 * height
-    if y is None:
+    line_height = ocr["line_height"]
+    seen_in = Counter(norm for o in observations for norm in o["norms"])
+    lines_of: dict[str, set[int]] = {}
+    for i, t in enumerate(tokens):
+        for form in anchor_forms(text, tokens, i):
+            lines_of.setdefault(form, set()).add(t.line)
+
+    def anchors(i: int) -> list[str]:
+        return [f for f in anchor_forms(text, tokens, i, k) if len(lines_of.get(f, ())) <= 1 and seen_in[f] == 1]
+
+    same_line = list(dict.fromkeys(f for i, t in enumerate(tokens) if i != k and t.line == tok.line for f in anchors(i)))
+    if same_line:
+        tolerance = 2.5 * line_height
+        line = one_line(seen_once(observations, same_line), tolerance)
+        y = statistics.median(center_y(o) for o in line)
+        return any(abs(center_y(o) - y) <= tolerance for o in hits)
+
+    def nearest(order: range) -> tuple[float, int] | None:
+        """Height and line of the nearest anchor in that order."""
+        for i in order:
+            if forms := anchors(i):
+                return center_y(seen_once(observations, forms[:1])[0][1]), tokens[i].line
+        return None
+
+    first, last = nearest(range(k - 1, -1, -1)), nearest(range(k + 1, len(tokens)))
+    if first is None and last is None:
         return True
-    return any(abs(center_y(o) - y) <= tolerance for o in hits)
+    ys = [found[0] for found in (first, last) if found]
+    top, bottom = min(ys) - 0.05 * height, max(ys) + 0.05 * height
+    if first is None or last is None:  # one side only: the token may lie lines away
+        y, line = first or last
+        reach = 2 * line_height * (abs(tok.line - line) + 1)
+        top, bottom = (top, bottom + reach) if first else (top - reach, bottom)
+    return any(top <= center_y(o) <= bottom for o in hits)
 
 
 # --- groups and zones ---------------------------------------------------------

@@ -19,6 +19,8 @@ Invariants:
   * an unreadable number inside an uncertainty mark ([?4]) gets no second mark;
   * Vision's forms of a number count as seeing it: "3,24" for "3, 24", "СТЗ" for "СТ3", "125.1" for "I25.1",
     "1019" for "10^9";
+  * Vision sees a number only at its place: a short number inside a code elsewhere does not move its line,
+    a sample number repeated in every block counts in its own block only, a round stamp is one place;
   * stamps, logos and requisite lines fall into the service zone, test results do not;
   * in the Markdown file an asterisk that starts a line is escaped, so it is not taken for a list;
   * crops hold the spot: a stamp over its owner's printed name, a note in the margin, a row whose
@@ -314,6 +316,47 @@ def check_vision_forms() -> list[str]:
     return errors
 
 
+def check_vision_places() -> list[str]:
+    """Vision sees a number only at its place, on a made-up page 2000 px high with lines 30 px high."""
+    errors = []
+    row = "| Тироксин свободный | 12, 34 | пмоль/л | (9 - 19) |\nКомментарий: до 19 лет"
+    block = ("{}\nВенозная кровь, № 1234567890, валидация 01.02.2024 10:00:00\n"
+             "Метод и оборудование: Фотометрия (Анализатор 100, Пример, Россия)\n"
+             "| Название/показатель | Результат | Референсные значения |\n| Концентрация | {} ммоль/л | {} |\n")
+    blocks = block.format("Глюкоза", "5.10", "4.1 - 5.9") + "\n" + block.format("Холестерин", "4.20", "< 5.2")
+    second = blocks.index("1234567890", blocks.index("Холестерин"))
+    stamp = "Врач Петрова А.А.\n[печать: Республика ОГРН 1027700000000 ДЛЯ ДОКУМЕНТОВ 7700000000]\nДата 12.03.2024"
+
+    def seen_blocks(sample: str) -> list[tuple[str, int, int, int]]:
+        """Vision's reading of both blocks; the second block's sample number as given."""
+        found = []
+        for y, name, number, value, norm in ((85, "Глюкоза", "1234567890", "5.10", "4.1 - 5.9"), (885, "Холестерин", sample, "4.20", "< 5.2")):
+            found += [(name, 100, y, 200), (f"Венозная кровь, Nº {number}, валидация 01.02.2024 10:00:00", 100, y + 30, 900),
+                      ("Метод и оборудование: Фотометрия (Анализатор 100, Пример, Россия)", 100, y + 60, 900),
+                      ("Концентрация", 100, y + 120, 300), (f"{value} ммоль/л", 500, y + 120, 200), (norm, 800, y + 120, 150)]
+        return found
+
+    for name, text, seen, start, expected in [
+        ("row whose short number Vision saw once inside a code elsewhere", row,
+         [("12,34", 900, 585, 100), ("(9-19)", 1250, 585, 150), ("0A12BC", 100, 1485, 300)], row.index("19)"), True),
+        ("row misread, the same number on another line", row,
+         [("12,34", 900, 585, 100), ("(9-18)", 1250, 585, 150), ("Комментарий: до 19 лет", 100, 1485, 600)], row.index("19)"), False),
+        ("sample number repeated in every block", blocks, seen_blocks("1234567890"), second, True),
+        ("sample number misread in its own block, right in the block before", blocks, seen_blocks("1234567896"), second, False),
+        ("number inside a round stamp", stamp,
+         [("Врач Петрова А.А.", 100, 485, 300), ("ОГРН", 1200, 885, 100), ("1027700000000", 1150, 910, 250),
+          ("ДЛЯ ДОКУМЕНТОВ", 1150, 935, 250), ("7700000000", 1175, 960, 200), ("Республика", 1175, 1015, 200)],
+         stamp.index("1027700000000"), True),
+    ]:
+        tokens = tokenize(text)
+        k = next(i for i, t in enumerate(tokens) if t.start == start)
+        ocr = {"observations": [{"text": t, "bbox": [x, y, w, 30], "norms": {tok.norm for tok in tokenize(t)}, "codes": codes(t)}
+                                for t, x, y, w in seen], "line_height": 30.0}
+        if vision_support(ocr, text, tokens, k, 2000) != expected:
+            errors.append(f"{name}: Vision {'does not see' if expected else 'sees'} «{tokens[k].raw}» at its place")
+    return errors
+
+
 def check_zones() -> list[str]:
     errors = []
     text = ("| Показатель | 4.87 | (3.5 - 5.0) |\n"
@@ -480,7 +523,7 @@ def check_signs() -> list[str]:
 
 
 def main() -> int:
-    errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_zones()
+    errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_vision_places() + check_zones()
                          + check_markdown() + check_places() + check_signs() + check_rows())
     for case in CASES:
         errors += run_case(*case)
@@ -500,7 +543,7 @@ def main() -> int:
                 errors += run_case(f"{doc} p{entry['page']}", load_text(paths["read_a"]), load_text(paths["read_b"]), exact=False)
     for error in errors:
         print("FAIL", error)
-    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 8} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
+    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 9} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
     return 1 if errors else 0
 
 
