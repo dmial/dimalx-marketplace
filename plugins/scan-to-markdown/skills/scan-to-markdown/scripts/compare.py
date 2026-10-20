@@ -9,6 +9,8 @@ Kinds of discrepancies:
   number / flag / text  A and B differ here (flag = arrows, triangles and signs like < > ± % * !)
   cells                 table cell borders "|" differ: a value may sit in another column
   unsure                only one reader marked this place as uncertain [?…]
+  punct                 the words agree, the signs between them differ: a colon, a square bracket
+                        or a minus before a number
   order / moved         same tokens, different order, no cell border involved: no decision needed
   vision_check          A and B agree on a number that Vision did not see in that line
   vision_extra          Vision found a number that neither A nor B has
@@ -31,6 +33,12 @@ Punctuation glued to the end of a discrepancy joins it when the readers differ t
 reader has are cut so that choosing B leaves the punctuation B has between their neighbours:
 "Тип исследования: Рентген" against "Тип Рентген" (the word moved to the next line) loses the
 colon with the word, "Дата взятия: 12" against "Дата: 12" keeps it.
+Choosing B everywhere gives B's tokens and B's colons, square brackets and minus signs before
+numbers ("-2.1", not the dash of "5-10"). Where the text between two agreed tokens would not, as
+with "Анамнез гипертония" against "Анамнез: гипертония", a "punct" discrepancy covers the two
+tokens: its B variant takes B's signs and keeps A's words. Where a discrepancy lies between them
+("Анамнез: гипертония" against "Анамнез гипортония"), it grows to them instead. Other
+punctuation (periods, commas, dashes) is not compared and stays as reader A wrote it.
 The comparison id covers the inputs and the resulting list of discrepancies: if either changes,
 earlier arbiter decisions no longer apply. So a page the arbiter has decided keeps its comparison
 when this logic changes, as long as its readings and OCR stay the same: the text built from the
@@ -42,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -77,8 +86,12 @@ from common import (
 )
 
 CONTEXT_CHARS = 60
-DECIDABLE = {"number", "flag", "cells", "unsure", "text", "vision_check", "vision_extra"}
-SEVERITY = {"moved": 0, "order": 1, "unsure": 2, "text": 3, "cells": 4, "flag": 5, "number": 6}
+DECIDABLE = {"number", "flag", "cells", "unsure", "punct", "text", "vision_check", "vision_extra"}
+SEVERITY = {"moved": 0, "order": 1, "punct": 2, "unsure": 3, "text": 4, "cells": 5, "flag": 6, "number": 7}
+# Signs that are no tokens but must come along with a reader's variant: colons, square brackets and
+# a minus right before a number ("-2.1", "(-0.5"). A dash right after a letter, digit, period or
+# comma is no minus: "5-10", "CS-6400".
+MARK_RE = re.compile(r"[\[\]:]|(?<![\w.,])[-−–](?=\d)")
 ROW_MARGIN_LINES = 2.0  # how many line heights above and below the spot a row crop shows
 MAX_EDGE = 2000
 # Marks for what is not printed text. Vision does not show their words, and the same words printed
@@ -309,6 +322,13 @@ def take_glued_punctuation(units: list[Unit], a: Text, b: Text) -> list[Unit]:
         fits = lambda ea, eb: following is None or (ea <= following.sa and eb <= following.sb)
         (left, right), (b_left, b_right) = gap(a, u.i1, u.i2), gap(b, u.j1, u.j2)
         if u.sa < u.ea and u.sb < u.eb:
+            if a.text[u.ea:ga] != b.text[u.eb:gb] and u.i2 < len(a.tokens) and u.j2 < len(b.tokens):
+                # Glue that runs into the next token on one side takes along the spaces the other
+                # side has there: "10:20" against "11 20" gives "11 20" with B, not "1120".
+                if ga == right and b.text[gb:b_right].isspace():
+                    gb = b_right
+                elif gb == b_right and a.text[ga:right].isspace():
+                    ga = right
             if a.text[u.ea:ga] != b.text[u.eb:gb] and fits(ga, gb):
                 u = replace(u, ea=ga, eb=gb)
         elif u.sa < u.ea:  # only in A
@@ -327,6 +347,14 @@ def take_glued_punctuation(units: list[Unit], a: Text, b: Text) -> list[Unit]:
 
 def edit_for_unit(a: Text, b: Text, u: Unit) -> dict:
     """Where text A changes if B's reading wins, and what goes there."""
+    a_words, b_words = a.tokens[u.i1:u.i2], b.tokens[u.j1:u.j2]
+    if u.kind == "punct" and [t.norm for t in a_words] == [t.norm for t in b_words]:
+        # The words agree: B's variant is B's signs between A's words.
+        pieces, cursor = [], u.sb
+        for mine, theirs in zip(a_words, b_words):
+            pieces += [b.text[cursor:theirs.start], mine.raw]
+            cursor = theirs.end
+        return {"mode": "inline", "a_span": [u.sa, u.ea], "b_text": "".join(pieces) + b.text[cursor:u.eb]}
     if u.sa < u.ea and u.sb < u.eb:
         return {"mode": "inline", "a_span": [u.sa, u.ea], "b_text": b.text[u.sb:u.eb]}
     if u.sa < u.ea:  # only in A
@@ -362,6 +390,119 @@ def edit_for_unit(a: Text, b: Text, u: Unit) -> dict:
     ends_them = a.glued(pos) != "" and a.glued(pos) == b.glued(u.eb)
     inserted = ("" if before.isspace() else " ") + b.text[u.sb:u.eb] + ("" if after.isspace() or ends_them else " ")
     return {"mode": "inline", "a_span": [pos, pos], "b_text": inserted}
+
+
+def landmarks(text: str) -> list[str]:
+    """The tokens of a text and its MARK_RE signs, in order; every kind of minus counts as "-"."""
+    signs = [(m.start(), "-" if m.group() in "−–" else m.group()) for m in MARK_RE.finditer(text)]
+    return [s for _, s in sorted(set(signs + [(t.start, t.norm) for t in tokenize(text)]))]
+
+
+def rebuilt(a: Text, start: int, end: int, edits: list[dict]) -> str | None:
+    """Text A from start to end with B's variant of the given edits, or None if one reaches outside."""
+    pieces, cursor = [], start
+    for edit in sorted(edits, key=lambda e: e["a_span"]):
+        s, e = edit["a_span"]
+        if not cursor <= s <= e <= end:
+            return None
+        pieces += [a.text[cursor:s], edit["b_text"]]
+        cursor = e
+    return "".join(pieces) + a.text[cursor:end]
+
+
+def chunk_of(units: list[Unit]) -> tuple[int, int, int, int]:
+    """The original diff chunks of the units together."""
+    return (min(u.chunk[0] for u in units), max(u.chunk[1] for u in units),
+            min(u.chunk[2] for u in units), max(u.chunk[3] for u in units))
+
+
+def joined(p: Unit, q: Unit, a: Text, b: Text, a2b: dict, b2a: dict) -> Unit:
+    """One unit covering both, their spans kept as they are."""
+    return settle(Unit(
+        kind=max(p.kind, q.kind, key=SEVERITY.get),
+        i1=min(p.i1, q.i1), i2=max(p.i2, q.i2), j1=min(p.j1, q.j1), j2=max(p.j2, q.j2),
+        sa=min(p.sa, q.sa), ea=max(p.ea, q.ea), sb=min(p.sb, q.sb), eb=max(p.eb, q.eb),
+        chunk=chunk_of([p, q]),
+    ), a, b, a2b, b2a)
+
+
+def span_between(text: Text, k: int, k2: int) -> tuple[int, int, int, int]:
+    """Tokens [i1, i2) and characters [start, end) from tokens[k] to tokens[k2], where -1 and
+    len(tokens) stand for the text edges. A cell border at either end stays outside, so that no
+    decision about a sign can move a column."""
+    tokens = text.tokens
+    if k < 0:
+        i1, start = 0, 0
+    elif tokens[k].kind == "cell":
+        i1, start = k + 1, tokens[k].end
+    else:
+        i1, start = k, tokens[k].start
+    if k2 >= len(tokens):
+        i2, end = len(tokens), len(text.text)
+    elif tokens[k2].kind == "cell":
+        i2, end = k2, tokens[k2].start
+    else:
+        i2, end = k2 + 1, tokens[k2].end
+    return i1, i2, start, end
+
+
+def on_table_row(text: Text, start: int, end: int) -> bool:
+    """True if the range touches a line of a table."""
+    lines = range(text.line_of(start), text.line_of(max(start, end - 1)) + 1)
+    return any(text.text[slice(*text.line_span(n))].lstrip().startswith("|") for n in lines)
+
+
+def carry_marks(units: list[Unit], a: Text, b: Text, a2b: dict, b2a: dict) -> list[Unit]:
+    """Make choosing B give B's tokens and MARK_RE signs between every two neighbouring agreed tokens
+    that no unit covers, and between the text edges and such tokens.
+
+    Where it would not, one unit covers both tokens and everything between them: a new "punct" unit
+    when no unit lies there ("Анамнез гипертония" against "Анамнез: гипертония"), else the units
+    there taken into it ("Анамнез: гипертония" against "Анамнез гипортония"; "Время 10:20" against
+    "Время 11 20", where B's "11" would run into A's "20"). Such a unit is at least "punct": readers
+    who differ there in more than the order of words need a decision.
+    """
+    for _ in range(len(a.tokens) + 2):  # each round adds at least one unit, or ends
+        units = sorted(units, key=lambda u: (u.sa, u.ea))
+        covered = {k for u in units for k in range(u.i1, u.i2)}
+        agreed = [k for k in range(len(a.tokens)) if k in a2b and k not in covered]
+        found: list[tuple[Unit, list[int]]] = []  # a new unit, and the units it takes in
+        for k, k2 in zip([-1] + agreed, agreed + [len(a.tokens)]):
+            m = a2b[k] if k >= 0 else -1
+            m2 = a2b[k2] if k2 < len(a.tokens) else len(b.tokens)
+            # Both tokens count, so that a variant running into one of them ("1120") shows.
+            a_start, gap_start = (a.tokens[k].start, a.tokens[k].end) if k >= 0 else (0, 0)
+            gap_end, a_end = (a.tokens[k2].start, a.tokens[k2].end) if k2 < len(a.tokens) else (len(a.text), len(a.text))
+            b_start, b_gap_start = (b.tokens[m].start, b.tokens[m].end) if m >= 0 else (0, 0)
+            b_gap_end, b_end = (b.tokens[m2].start, b.tokens[m2].end) if m2 < len(b.tokens) else (len(b.text), len(b.text))
+            if any(spans_overlap(f.sa, f.ea, gap_start, gap_end) or spans_overlap(f.sb, f.eb, b_gap_start, b_gap_end) for f, _ in found):
+                continue  # a unit found just now reaches in here (the "]" of a moved bracket): next round
+            inside = [n for n, u in enumerate(units) if gap_start <= u.sa and u.ea <= gap_end]
+            middle = rebuilt(a, gap_start, gap_end, [edit_for_unit(a, b, units[n]) for n in inside])
+            if middle is not None and landmarks(a.text[a_start:gap_start] + middle + a.text[gap_end:a_end]) == landmarks(b.text[b_start:b_end]):
+                continue
+            (i1, i2, sa, ea), (j1, j2, sb, eb) = span_between(a, k, k2), span_between(b, m, m2)
+            if a.text[sa:ea].count("\n") != b.text[sb:eb].count("\n") and (on_table_row(a, sa, ea) or on_table_row(b, sb, eb)):
+                continue  # B's variant would join or split table rows: left as it is, for the self-test to stop
+            unit = Unit("punct", i1, i2, j1, j2, sa, ea, sb, eb, (i1, i2, j1, j2))
+            if inside:  # what those units differ in stays what to look for on the scan
+                kind = max(["punct"] + [units[n].kind for n in inside], key=SEVERITY.get)
+                unit = replace(unit, kind=kind, chunk=chunk_of([units[n] for n in inside]))
+            found.append((settle(unit, a, b, a2b, b2a), inside))
+        if not found:
+            break
+        taken = {n for _, inside in found for n in inside}
+        units = [u for n, u in enumerate(units) if n not in taken]
+        for unit, _ in found:
+            # Take in whatever the new unit now overlaps or shares a table row with.
+            others = [o for o in units if must_merge(unit, o, a, b)]
+            while others:
+                for other in others:
+                    units.remove(other)
+                    unit = joined(unit, other, a, b, a2b, b2a)
+                others = [o for o in units if must_merge(unit, o, a, b)]
+            units.append(unit)
+    return sorted(units, key=lambda u: (u.sa, u.ea))
 
 
 def classify(tokens: list[Token]) -> str:
@@ -486,7 +627,8 @@ def diff_units(a: Text, b: Text) -> tuple[list[Unit], dict[int, int], float]:
         if j1 < j2:
             sb, eb = b.tokens[j1].start, b.tokens[j2 - 1].end
         units.append(settle(Unit(kind, i1, i2, j1, j2, sa, ea, sb, eb, (i1, i2, j1, j2)), a, b, a2b, b2a))
-    return take_glued_punctuation(merge_overlapping(units, a, b, a2b, b2a), a, b), a2b, matcher.ratio()
+    units = take_glued_punctuation(merge_overlapping(units, a, b, a2b, b2a), a, b)
+    return carry_marks(units, a, b, a2b, b2a), a2b, matcher.ratio()
 
 
 def looked_for(a: Text, b: Text, u: Unit) -> tuple[set[str], set[str]]:

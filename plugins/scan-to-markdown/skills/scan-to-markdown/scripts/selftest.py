@@ -5,7 +5,10 @@ Invariants:
   * choosing A everywhere reproduces text A character for character;
   * choosing B everywhere reproduces text B: character for character on the built-in cases
     (their agreed parts are identical), and as the same sequence of words, numbers, signs,
-    brackets, colons and asterisks on real pages (agreed parts may differ in spacing there);
+    brackets, colons, asterisks and minus signs before numbers on real pages (agreed parts may
+    differ in spacing there);
+  * a colon, bracket or minus that differs between agreed words is a discrepancy of its own; next
+    to a differing word it joins that discrepancy; choosing B there keeps A's words;
   * any mix of choices keeps every table row whole;
   * a reviewer's correction replaces exactly its fragment and moves later marks along;
   * an unreadable number inside an uncertainty mark ([?4]) gets no second mark;
@@ -76,6 +79,21 @@ CASES = [
     ("word before a colon only in B", "Дата: 12.03.2024", "Дата взятия: 12.03.2024"),
     ("value after a colon only in B", "Анамнез:\nДиагноз: нет", "Анамнез: без особенностей\nДиагноз: нет"),
     ("start of a range only in A", "доза 5-10 мг", "доза 10 мг"),
+    ("colon only in B between agreed words", "Анамнез гипертония", "Анамнез: гипертония"),
+    ("colon only in A between agreed words", "Анамнез: гипертония", "Анамнез гипертония"),
+    ("colon at a line end only in B", "Заключение\nПатологии не выявлено", "Заключение:\nПатологии не выявлено"),
+    ("colon at the text end only in B", "Подпись врача", "Подпись врача:"),
+    ("two colons of a time only in A", "Время 10:20:30", "Время 10 20 30"),
+    ("colon only in A before a misread word", "Анамнез: гипертония", "Анамнез гипортония"),
+    ("colon only in B before a misread word", "Анамнез гипертония", "Анамнез: гипортония"),
+    ("time colon only in A next to a misread number", "Время 10:20", "Время 11 20"),
+    ("time colon only in B next to a misread number", "Время 11 20", "Время 10:20"),
+    ("closing bracket in another place", "Рост [от руки: 12] мм", "Рост [от руки: 12 мм]"),
+    ("signature mark only in B", "Подпись врача подпись", "Подпись врача [подпись]"),
+    ("empty checkbox only in A at the text start", "[ ] Да\nНет", "Да\nНет"),
+    ("minus only in A in a table", "| Показатель | -2.1 | ммоль/л |", "| Показатель | 2.1 | ммоль/л |"),
+    ("minus only in B", "Ось 30°", "Ось -30°"),
+    ("minus and a misread number in one row", "| Показатель | -2.1 | 4.87 |", "| Показатель | 2.1 | 4.82 |"),
 ]
 # Cases where line breaks legitimately stay as in A, so B is matched by structure, not character by character.
 LAYOUT_CASES = [
@@ -86,6 +104,10 @@ SAME = [
     ("homoglyphs and decimal comma", "Т3(общ) = 2,45 нмоль/л", "T3(общ) = 2.45 нмоль/л"),
     ("table spacing and case", "| Показатель | 128 г/л |", "|Показатель|128 Г/Л|"),
     ("superscript in a unit", "Объем 331 см³.", "Объем 331 см3."),
+    ("spaces around a colon", "Анамнез : гипертония", "Анамнез: гипертония"),
+    ("periods and commas", "Без изменений, норма.", "Без изменений норма"),
+    ("dash of a range", "Норма 5-10 мг", "Норма 5 - 10 мг"),
+    ("forms of a minus", "Ось -30°", "Ось −30°"),
 ]
 
 
@@ -95,12 +117,13 @@ def squeeze(text: str) -> str:
     return re.sub(r" *([\[\]]) *", r"\1", re.sub(r" +", " ", text))
 
 
-STRUCTURE_RE = re.compile(r"[\[\]:*]")
+STRUCTURE_RE = re.compile(r"[\[\]:*]|(?<![\w.,])[-−–](?=\d)")  # a minus right before a number, not in "5-10"
 
 
 def structure(text: str) -> list[tuple[int, str]]:
-    """Words, numbers and signs together with brackets, colons and asterisks, in order, with positions."""
-    marks = [(m.start(), m.group()) for m in STRUCTURE_RE.finditer(text)]
+    """Words, numbers and signs together with brackets, colons, asterisks and minus signs before
+    numbers (any kind of minus as "-"), in order, with positions."""
+    marks = [(m.start(), "-" if m.group() in "−–" else m.group()) for m in STRUCTURE_RE.finditer(text)]
     return sorted(set(marks + [(t.start, t.norm) for t in tokenize(text)]))
 
 
@@ -304,9 +327,27 @@ def check_places() -> list[str]:
     return errors
 
 
+def check_signs() -> list[str]:
+    """A sign that differs between agreed words is a spot of its own for the arbiter; next to a
+    misread word it joins that spot instead of adding one. Choosing B there keeps A's words."""
+    errors = []
+    for a_text, b_text, kinds, final in [
+        ("Анамнез: гипертония", "АНАМНЕЗ гипертония", ["punct"], "Анамнез гипертония"),
+        ("Ось 30°", "Ось -30°", ["punct"], "Ось -30°"),
+        ("Анамнез: гипертония", "Анамнез гипортония", ["text"], "Анамнез гипортония"),
+    ]:
+        a, b = Text(a_text), Text(b_text)
+        units, _, _ = diff_units(a, b)
+        edits = [edit_for_unit(a, b, u) for u in units]
+        got, _, problems = apply_edits(a_text, [Edit(*e["a_span"], e["b_text"], "resolved", "d") for e in edits], 1000, 1000)
+        if [u.kind for u in units] != kinds or problems or got != final:
+            errors.append(f"«{a_text}» against «{b_text}»: {[u.kind for u in units]} giving {got!r} with B, expected {kinds} giving {final!r}")
+    return errors
+
+
 def main() -> int:
     errors: list[str] = (check_corrections() + check_marks() + check_vision_forms() + check_zones()
-                         + check_markdown() + check_places())
+                         + check_markdown() + check_places() + check_signs())
     for case in CASES:
         errors += run_case(*case)
     for case in LAYOUT_CASES:
@@ -325,7 +366,7 @@ def main() -> int:
                 errors += run_case(f"{doc} p{entry['page']}", load_text(paths["read_a"]), load_text(paths["read_b"]), exact=False)
     for error in errors:
         print("FAIL", error)
-    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 6} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
+    print(f"{len(CASES) + len(LAYOUT_CASES) + len(SAME) + 7} built-in cases, {pages} real pages: {'all passed' if not errors else f'{len(errors)} failures'}")
     return 1 if errors else 0
 
 

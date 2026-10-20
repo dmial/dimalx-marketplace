@@ -61,6 +61,7 @@ VERDICTS = {
     "flag": {"A", "B", "own", "illegible"},
     "text": {"A", "B", "own", "illegible"},
     "unsure": {"A", "B", "own", "illegible"},
+    "punct": {"A", "B", "own", "illegible"},
     "cells": {"A", "B", "own", "illegible"},
     "vision_check": {"confirmed", "own", "illegible"},
     "vision_extra": {"already_present", "ocr_noise", "missing"},
