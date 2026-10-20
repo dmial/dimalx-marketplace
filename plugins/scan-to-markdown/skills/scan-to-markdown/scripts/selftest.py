@@ -68,6 +68,12 @@ CASES = [
     ("colon inside a mark only in B", "[?дан]: 12.03.2024", "[?азн:] 12.03.2024"),
     ("footnote star inside a mark only in B", "[печать: Лаборатория № 12]\n\n* Время указано", "[печать: Лаборатория № 12]\n\n[?*] Время указано"),
     ("star flag only in A", "| Глюкоза | 6.70 * | ммоль/л |", "| Глюкоза | 6.70 | ммоль/л |"),
+    ("word with a colon moved to the next line", "Тип исследования: Рентген грудной клетки\nДоза: 0.1", "Тип Рентген грудной клетки\nисследования:\nДоза: 0.1"),
+    ("word with a colon moved into the line", "Тип Рентген грудной клетки\nисследования:\nДоза: 0.1", "Тип исследования: Рентген грудной клетки\nДоза: 0.1"),
+    ("word before a colon only in A", "Дата взятия: 12.03.2024", "Дата: 12.03.2024"),
+    ("word before a colon only in B", "Дата: 12.03.2024", "Дата взятия: 12.03.2024"),
+    ("value after a colon only in B", "Анамнез:\nДиагноз: нет", "Анамнез: без особенностей\nДиагноз: нет"),
+    ("start of a range only in A", "доза 5-10 мг", "доза 10 мг"),
 ]
 # Cases where line breaks legitimately stay as in A, so B is matched by structure, not character by character.
 LAYOUT_CASES = [

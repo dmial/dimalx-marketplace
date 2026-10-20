@@ -21,7 +21,10 @@ quick look.
 A discrepancy that touches a bracketed group such as [от руки: ✓], [печать: …] or (?) always
 covers the whole group on both sides, so choosing one reader's variant replaces whole groups.
 Punctuation glued to the end of a discrepancy joins it when the readers differ there
-("[?азн:]" against "[?дан]:"), so choosing B neither loses nor doubles a colon.
+("[?азн:]" against "[?дан]:"), so choosing B neither loses nor doubles a colon. Words only one
+reader has are cut so that choosing B leaves the punctuation B has between their neighbours:
+"Тип исследования: Рентген" against "Тип Рентген" (the word moved to the next line) loses the
+colon with the word, "Дата взятия: 12" against "Дата: 12" keeps it.
 The comparison id covers the inputs and the resulting list of discrepancies: if either changes,
 earlier arbiter decisions no longer apply. So a page the arbiter has decided keeps its comparison
 when this logic changes, as long as its readings and OCR stay the same: the text built from the
@@ -153,6 +156,10 @@ class Text:
             pos += 1
         return pos
 
+    def glued(self, pos: int) -> str:
+        """The punctuation glued to position pos, as ":" right after "Анамнез"."""
+        return self.text[pos:self.glue_end(pos)]
+
     def context(self, start: int, end: int) -> str:
         left = self.text[max(0, start - CONTEXT_CHARS):start]
         right = self.text[end:end + CONTEXT_CHARS]
@@ -246,18 +253,50 @@ def merge_overlapping(units: list[Unit], a: Text, b: Text, a2b: dict, b2a: dict)
         units = [u for k, u in enumerate(units) if k not in pair] + [settle(merged, a, b, a2b, b2a)]
 
 
+def gap(text: Text, i: int, j: int) -> tuple[int, int]:
+    """Character range between the neighbours of tokens[i:j]: from the end of tokens[i-1] to the
+    start of tokens[j]."""
+    start = text.tokens[i - 1].end if i > 0 else 0
+    end = text.tokens[j].start if j < len(text.tokens) else len(text.text)
+    return start, end
+
+
+def marks(text: str) -> str:
+    """Everything but the spaces: the punctuation and brackets a stretch of text carries."""
+    return "".join(text.split())
+
+
 def take_glued_punctuation(units: list[Unit], a: Text, b: Text) -> list[Unit]:
     """Grow a unit over the punctuation glued to its end when A and B differ there, as in "[?азн:]"
     against "[?дан]:". The text between units comes from A: without this, choosing B would drop
-    B's colon (or keep A's next to B's own one in the mirrored case)."""
+    B's colon (or keep A's next to B's own one in the mirrored case).
+
+    Words only one reader has are cut so that choosing B leaves between their neighbours the same
+    punctuation as B has there. Words only in A take the punctuation glued to them along when
+    that is so: "Тип исследования: Рентген" against "Тип Рентген" loses the colon with the word,
+    "Дата взятия: 12" against "Дата: 12" keeps it. Words only in B go in before or after the
+    punctuation A has at that place and bring their own where it is missing: "Анамнез: нет" into
+    "Анамнез:", "взятия" into "Дата: 12". When no cut gives B's punctuation, nothing changes.
+    """
     grown = []
     for n, u in enumerate(units):
+        ga, gb = a.glue_end(u.ea), b.glue_end(u.eb)
+        following = units[n + 1] if n + 1 < len(units) else None
+        fits = lambda ea, eb: following is None or (ea <= following.sa and eb <= following.sb)
+        (left, right), (b_left, b_right) = gap(a, u.i1, u.i2), gap(b, u.j1, u.j2)
         if u.sa < u.ea and u.sb < u.eb:
-            ga, gb = a.glue_end(u.ea), b.glue_end(u.eb)
-            following = units[n + 1] if n + 1 < len(units) else None
-            fits = following is None or (ga <= following.sa and gb <= following.sb)
-            if a.text[u.ea:ga] != b.text[u.eb:gb] and fits:
+            if a.text[u.ea:ga] != b.text[u.eb:gb] and fits(ga, gb):
                 u = replace(u, ea=ga, eb=gb)
+        elif u.sa < u.ea:  # only in A
+            if marks(a.text[left:u.sa] + a.text[ga:right]) == marks(b.text[b_left:b_right]) and fits(ga, u.eb):
+                u = replace(u, ea=ga)
+        elif u.sb < u.eb:  # only in B: in at u.sa as before, with its own punctuation, or after A's
+            want = marks(b.text[b_left:u.sb]), marks(b.text[u.eb:b_right])
+            for pos, end in ((u.sa, u.eb), (u.sa, gb), (ga, gb)):
+                if (marks(a.text[left:pos]), marks(b.text[u.eb:end] + a.text[pos:right])) == want:
+                    if fits(pos, end):
+                        u = replace(u, sa=pos, ea=pos, eb=end)
+                    break
         grown.append(u)
     return grown
 
@@ -276,7 +315,9 @@ def edit_for_unit(a: Text, b: Text, u: Unit) -> dict:
                 start -= 1
             return {"mode": "lines", "a_span": [start, end], "b_text": ""}
         start, end = u.sa, u.ea
-        if start > 0 and a.text[start - 1] == " ":
+        # A word or mark right behind ("лечебно-" before "профилактического") keeps the space before.
+        word_next = end < len(a.text) and not a.text[end].isspace() and a.glue_end(end) == end
+        if start > 0 and a.text[start - 1] == " " and not word_next:
             start -= 1  # take one neighbouring space along, so no double space is left
         elif end < len(a.text) and a.text[end] == " ":
             end += 1
@@ -293,7 +334,9 @@ def edit_for_unit(a: Text, b: Text, u: Unit) -> dict:
     pos = u.sa
     before = a.text[pos - 1] if pos > 0 else "\n"
     after = a.text[pos] if pos < len(a.text) else "\n"
-    inserted = ("" if before.isspace() else " ") + b.text[u.sb:u.eb] + ("" if after.isspace() else " ")
+    # A's punctuation right here that B has right after the new words ends them: no space before it.
+    ends_them = a.glued(pos) != "" and a.glued(pos) == b.glued(u.eb)
+    inserted = ("" if before.isspace() else " ") + b.text[u.sb:u.eb] + ("" if after.isspace() or ends_them else " ")
     return {"mode": "inline", "a_span": [pos, pos], "b_text": inserted}
 
 
