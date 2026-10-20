@@ -22,7 +22,11 @@ Invariants:
   * stamps, logos and requisite lines fall into the service zone, test results do not;
   * in the Markdown file an asterisk that starts a line is escaped, so it is not taken for a list;
   * crops hold the spot: a stamp over its owner's printed name, a note in the margin, a row whose
-    line a short number inside a code could take, a date on a line without words.
+    line a short number inside a code could take, a date on a line without words, a word a logo
+    beside its line also has, a signature block above many footnote words and a page number, a
+    check under table headers repeated down the page, depth marks beside a scan, a misread label
+    at the start of a row, a line repeated in every block; and they leave out a logo at the height
+    of a line Vision read, and the text far below a stamp.
 A failure names the case and shows both texts only around the first place where they part.
 
 Usage: python3 selftest.py   (inside a project it also checks every page that has both readings)
@@ -338,15 +342,16 @@ def check_markdown() -> list[str]:
 
 
 def check_places() -> list[str]:
-    """Crops hold the spot, on a made-up page 2000 px high with lines 30 px high. A spot is (x0, y0,
-    x1, y1) on the scan; a framed box must hold it, a row crop (vision checks) or a band must hold
-    its lines."""
+    """Crops hold the spot, on a made-up page 2000 px high with lines 30 px high (Vision's
+    observations: text, x, y, width and, if not 30, height). A spot is (x0, y0, x1, y1) on the scan;
+    a framed box must hold it, a row crop (vision checks) or a band must hold its lines. A crop may
+    also have to leave out something next to the spot (x0, y0, x1, y1)."""
     errors = []
 
-    def where(a_text: str, b_text: str, seen: list[tuple[str, int, int, int]], fragment: str) -> tuple:
+    def where(a_text: str, b_text: str, seen: list[tuple], fragment: str) -> tuple:
         """compare.py's place of the discrepancy at `fragment` of A, or of that agreed number if none."""
-        ocr = {"observations": [{"text": t, "bbox": [x, y, w, 30], "norms": {k.norm for k in tokenize(t)}, "codes": codes(t)}
-                                for t, x, y, w in seen], "line_height": 30.0}
+        ocr = {"observations": [{"text": t, "bbox": [x, y, w, h[0] if h else 30], "norms": {k.norm for k in tokenize(t)}, "codes": codes(t)}
+                                for t, x, y, w, *h in seen], "line_height": 30.0}
         a, b = Text(a_text), Text(b_text)
         start = a_text.index(fragment)
         unit = next((u for u in diff_units(a, b)[0] if u.sa <= start < u.ea), None)
@@ -356,20 +361,59 @@ def check_places() -> list[str]:
         k = next(i for i, t in enumerate(a.tokens) if t.start == start)
         return place_check(a, ocr, 2000, k, k + 1)
 
-    def holds(found: tuple, spot: tuple[int, int, int, int], row: bool) -> bool:
+    def shown(found: tuple, row: bool) -> tuple[float, float, float, float]:
+        """What the crop shows at least: the framed box, or the full width of its row or band."""
         box, _, (top, bottom) = found
-        x0, y0, x1, y1 = spot
         if box and not row:
-            return box[0] <= x0 and x1 <= box[0] + box[2] and box[1] <= y0 and y1 <= box[1] + box[3]
+            return box[0], box[1], box[0] + box[2], box[1] + box[3]
         if box:
             top, bottom = box[1] - 30, box[1] + box[3] + 30
-        return top - 45 <= y0 and y1 <= bottom + 45
+        return 0, top - 45, 10_000, bottom + 45
+
+    def holds(found: tuple, spot: tuple[int, int, int, int], row: bool) -> bool:
+        x0, y0, x1, y1 = shown(found, row)
+        return x0 <= spot[0] and spot[2] <= x1 and y0 <= spot[1] and spot[3] <= y1
+
+    def leaves_out(found: tuple, other: tuple[int, int, int, int], row: bool) -> bool:
+        x0, y0, x1, y1 = shown(found, row)
+        return other[2] < x0 or x1 < other[0] or other[3] < y0 or y1 < other[1]
+
+    def blocks(*rows: str) -> str:
+        """Three made-up test blocks with the same headers, then a footnote."""
+        return "\n\n".join(f"Анализ {name}\nМатериал: сыворотка крови\nМетод: фотометрия кинетическая, прибор Анлайзер X-200\n"
+                           f"| Показатель | Результат | Норма |\n|---|---|---|\n| Уровень | {value} ммоль/л | <6 |"
+                           for name, value in zip(("альфа", "бета", "гамма"), rows)) + "\n\n* Время указано по местному времени"
+
+    def blocks_seen(*rows: str) -> list[tuple]:
+        seen = []
+        for y, name, value in zip((200, 600, 1000), ("альфа", "бета", "гамма"), rows):
+            seen += [(f"Анализ {name}", 100, y, 300), ("Материал: сыворотка крови", 100, y + 40, 400),
+                     ("Метод: фотометрия кинетическая, прибор Анлайзер X-200", 100, y + 80, 900), ("Показатель", 100, y + 120, 200),
+                     ("Результат", 600, y + 120, 200), ("Норма", 1200, y + 120, 150), ("Уровень", 100, y + 160, 150),
+                     (f"{value} ммоль/л", 600, y + 160, 200), ("<6", 1200, y + 160, 50)]
+        return seen + [("* Время указано по местному времени", 100, 1800, 700)]
 
     stamp = "Заключение: без особенностей.\nВрач Петрова А.А. [печать: {} АННА ВРАЧ]\nДата 12.03.2024"
     note = "ФИО Иванов И.И. Дата рождения: 01.01.1970 [от руки: вр. {}]\nВид оплаты ОМС"
     row = "| Тироксин свободный | 12, 34 | пмоль/л | (9 - 19) |\n[штрихкод]"
     dated = "Протокол исследования\nПротокол исследования\nот 05.06.2024\n\nПациент Иванов Возраст 54"
-    for name, a_text, b_text, seen, fragment, spot, is_row in [
+    logo = "[логотип: EXAMPLELAB]\nЛаборатория Примерлаб\nСайт в сети: www.{}.ru"
+    notes = "* Примечание первое к анализу\n** Примечание второе к анализу\nОтчёт сформирован автоматически\nЛист 1 из 1"
+    signed = "Итог исследования: норма\n\nЗаведующий лабораторией\nЛицензия Л-1 от 03.04.2021\n\n" + notes
+    scale = "Режим R2\nПараметры P5 K17\n\n[изображение: снимок]\n\n0\n5\n10\n15\n\n77/77"
+    scale_seen = [("Режим R2", 50, 150, 200), ("Параметры P5 K17", 50, 250, 300), ("5", 1500, 600, 20),
+                  ("- 10", 1480, 1000, 50), ("- 15", 1480, 1400, 50), ("1 77/77", 900, 1800, 150)]
+    table = "| Показатель | Результат | Норма |\n|---|---|---|\n| {} | 4.87 Ед/л | <40 |"
+    site = "Сайт: www.{}.ru\n[логотип: QMS]\n\nТекст заключения"
+    signer = "Заключение: без особенностей\nВрач отделения\n[печать: ОТДЕЛЕНИЕ {}]\n\n* Сноска о времени исследования"
+    samples = "\n\n".join(f"Тест {name}\nПроба № 5550001112, дата 01.01.2020\n| Уровень | {cells} |" for name, cells in
+                          (("альфа", "1.10 | 0.5 - 2.5 | низкий"), ("бета", "2.20 | <3"), ("гамма", "3.30 | <4")))
+    samples_seen = []
+    for y, name in ((200, "альфа"), (600, "бета"), (1000, "гамма")):
+        samples_seen += [(f"Тест {name}", 100, y, 300), ("Проба № 5550001112, дата 01.01.2020", 100, y + 40, 700), ("Уровень", 100, y + 80, 150)]
+    samples_seen += [("1.10", 600, 280, 100), ("0.5 - 2.5", 900, 280, 150), ("низкий", 1200, 280, 120),
+                     ("2.20", 600, 680, 100), ("<3", 900, 680, 50), ("3.30", 600, 1080, 100), ("<4", 900, 1080, 50)]
+    for name, a_text, b_text, seen, fragment, spot, is_row, *away in [
         ("stamp over its owner's printed name", stamp.format("ПЕТРОВА"), stamp.format("ПЕ[?Т]РОВА"),
          [("Заключение: без особенностей.", 100, 885, 600), ("Врач Петрова А.А.", 100, 985, 300), ("Дата 12.03.2024", 100, 1085, 300)],
          "[печать", (500, 880, 800, 1040), False),
@@ -382,10 +426,38 @@ def check_places() -> list[str]:
         ("date on a line without words", dated, dated,
          [("Протокол исследования", 100, 85, 400), ("Пациент Иванов Возраст 54", 100, 1465, 600)],
          "05.06.2024", (150, 1350, 400, 1370), True),
+        ("word of a logo beside its misread line", logo.format("examplelab"), logo.format("[?examplelab]"),
+         [("EXAMPLELAB", 100, 60, 150, 70), ("Лаборатория Примерлаб", 300, 50, 400), ("Сайт в сети: www.examp1elab.ru", 300, 90, 400)],
+         "examplelab.ru", (560, 95, 650, 115), False),
+        ("signature block with a date, many footnote words, a 1 in the footer", signed,
+         signed.replace("Заведующий лабораторией\nЛицензия Л-1 от 03.04.2021\n\n", ""),
+         [("Итог исследования: норма", 100, 400, 500), ("от 03.04.2021", 1100, 385, 200), ("1QX", 900, 600, 100),
+          ("* Примечание первое к анализу", 100, 1500, 600), ("** Примечание второе к анализу", 100, 1540, 600),
+          ("Отчёт сформирован автоматически", 100, 1600, 600), ("Лист 1 из 1", 1300, 1700, 200)],
+         "Заведующий", (1110, 390, 1290, 410), False),
+        ("check under table headers repeated down the page", blocks("4.20", "5.10", "7.35"), blocks("4.20", "5.10", "7.35"),
+         blocks_seen("4.20", "5.10", "7.35"), "7.35", (600, 1165, 800, 1185), True),
+        ("depth mark beside a scan, below its text", scale, scale, scale_seen, "0\n5\n10", (1500, 185, 1520, 205), True),
+        ("depth mark far from the marks before and after it", scale, scale, scale_seen, "15\n\n77", (1480, 1405, 1530, 1425), True),
+        ("misread label at the start of a row", table.format("Активность"), table.format("Акти[?в]ность"),
+         [("Показатель", 100, 500, 200), ("Результат", 700, 500, 200), ("Норма", 1300, 500, 150),
+          ("Актиьность", 100, 560, 180), ("4.87 Ед/л", 700, 560, 180), ("<40", 1300, 560, 60)],
+         "Активность", (110, 565, 270, 585), False),
+        ("misread word inside its line, a logo at the same height", site.format("medlab"), site.format("[?medlab]"),
+         [("Сайт: www.rnedlab.ru", 100, 300, 400), ("QMS", 1200, 295, 80, 40)],
+         "medlab", (330, 305, 450, 325), False, (1200, 295, 1280, 335)),
+        ("stamp by its line, the next text far below", signer.format("ДИАГНОСТИКИ"), signer.format("ДИАГНОСТИ[?К]И"),
+         [("Заключение: без особенностей", 100, 700, 600), ("Врач отделения", 100, 800, 300),
+          ("* Сноска о времени исследования", 100, 1800, 700)],
+         "[печать", (700, 790, 1000, 990), False, (100, 1800, 800, 1830)),
+        ("check of a line repeated in every block", samples, samples, samples_seen,
+         "5550001112, дата 01.01.2020\n| Уровень | 2.20", (300, 645, 600, 665), True),
     ]:
         found = where(a_text, b_text, seen, fragment)
         if not holds(found, spot, is_row):
             errors.append(f"crop of «{name}» misses the spot {spot}: box {found[0]}, range {tuple(round(v) for v in found[2])}")
+        elif away and not leaves_out(found, away[0], is_row):
+            errors.append(f"crop of «{name}» takes in {away[0]} too: box {found[0]}, range {tuple(round(v) for v in found[2])}")
     return errors
 
 

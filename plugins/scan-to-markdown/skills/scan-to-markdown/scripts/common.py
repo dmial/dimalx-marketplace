@@ -396,6 +396,20 @@ def union_box(observations: list[dict[str, Any]]) -> list[float]:
     return [left, top, right - left, bottom - top]
 
 
+LARGE_REACH = 0.12  # how far stamps, signatures and pictures reach from their line, as a share of the page height
+
+
+@dataclass
+class Spot:
+    """What compare.py knows of a spot in its text; it makes `locate` stricter."""
+
+    line: int  # the spot's line
+    once: dict[str, int]  # printed tokens that stand on one line only ("77/77" too), with that line
+    large_lines: frozenset[int]  # lines with stamps, signatures and pictures
+    large: bool  # the spot itself is a stamp, a signature or a picture
+    sides: tuple[set[str], set[str]]  # printed words and numbers of the spot's line before and after it
+
+
 def locate(
     ocr: dict[str, Any],
     interest: set[str],
@@ -404,7 +418,7 @@ def locate(
     height: int,
     line_norms: list[str] | None = None,
     whole_line: bool = True,
-    lines: tuple[int, dict[str, int]] | None = None,
+    spot: Spot | None = None,
 ) -> tuple[list[float] | None, float, tuple[float, float]]:
     """Where a spot is on the page: (OCR box or None, estimated y, estimated (top, bottom)), in pixels.
 
@@ -414,49 +428,102 @@ def locate(
     nearby tokens that Vision saw exactly once (`around`: before and after the spot, nearest first);
     without a box, the spot lies between the nearest of them.
 
-    `lines` (the spot's line, and the line of every token the text has once) makes the estimate
-    stricter: only such tokens anchor it, so Vision's one reading of a word printed twice cannot pull
-    the spot to the other place. With an anchor on one side only, the estimate reaches two line
-    heights past it for every line between it and the spot; with no anchor, 15% of the page each way.
+    `spot` makes the estimate stricter. Only tokens printed on one line anchor it, so Vision's one
+    reading of a word printed twice cannot pull the spot to the other place. On a known line, a find
+    much taller than the line (a logo beside it) is not on it, and the whole line is as `line_box`
+    frames it. Without a known line, the spot lies between its nearest anchors, as `between` finds it.
     """
     observations = ocr["observations"]
     line_height = ocr["line_height"]
-    if lines is not None:
-        spot, once = lines
-        line_norms = [n for n in line_norms or [] if n in once]
-        around = ([n for n in around[0] if n in once], [n for n in around[1] if n in once])
+    if spot is not None:
+        line_norms = [n for n in line_norms or [] if n in spot.once]
+        around = ([n for n in around[0] if n in spot.once], [n for n in around[1] if n in spot.once])
     overlap = lambda o: len(o["norms"] & interest)
     line_anchors = seen_once(observations, line_norms or [])
     if line_anchors:
         line = one_line(line_anchors, line_height)  # a word seen once elsewhere does not move the line
         y = statistics.median(center_y(o) for o in line)
-        hits = [o for o in observations if overlap(o) and abs(center_y(o) - y) <= line_height]
+        tall = 1.5 * max([line_height] + [o["bbox"][3] for o in line])  # taller is a logo or a heading
+        hits = [o for o in observations if overlap(o) and abs(center_y(o) - y) <= line_height
+                and (spot is None or o["bbox"][3] <= tall)]
         if hits:
             return min(hits, key=lambda o: (-overlap(o), abs(center_y(o) - y)))["bbox"], y, (y, y)
-        return (union_box(line) if whole_line else None), y, (y, y)
+        if not whole_line:
+            return None, y, (y, y)
+        return (union_box(line) if spot is None else line_box(observations, line, y, tall, spot, line_height)), y, (y, y)
     before, after = around
+    first, last = seen_once(observations, before)[:1], seen_once(observations, after)[:1]
+    if spot is not None and (first or last):
+        return between(observations, interest, first, last, spot, height, line_height)
     anchors = [o for _, o in seen_once(observations, before + after)]
     if anchors:
         y = statistics.median(center_y(o) for o in anchors)
         hits = [o for o in observations if overlap(o) and abs(center_y(o) - y) <= 0.15 * height]
         if hits:
             return min(hits, key=lambda o: (-overlap(o), abs(center_y(o) - y)))["bbox"], y, (y, y)
-        first, last = seen_once(observations, before)[:1], seen_once(observations, after)[:1]
         if first and last and abs(center_y(last[0][1]) - center_y(first[0][1])) > 0.25 * height:
             last = []  # the text jumps to another block: trust the line before the spot
         ys = [center_y(o) for _, o in first + last]
-        top, bottom = min(ys), max(ys)
-        if lines is not None and not (first and last):  # one side only: the spot may lie lines away
-            norm = (first or last)[0][0]
-            reach = 2 * line_height * (abs(spot - once[norm]) + 1)
-            top, bottom = (top, min(height, bottom + reach)) if first else (max(0, top - reach), bottom)
-        return None, (top + bottom) / 2, (top, bottom)
+        return None, (min(ys) + max(ys)) / 2, (min(ys), max(ys))
     y = fallback_ratio * height
     hits = [o for o in observations if overlap(o)]
     if not hits:
-        reach = 0.15 * height if lines is not None else 0
+        reach = 0.15 * height if spot is not None else 0
         return None, y, (max(0, y - reach), min(height, y + reach))
     best = min(hits, key=lambda o: (-overlap(o), abs(center_y(o) - y)))
+    return best["bbox"], center_y(best), (center_y(best), center_y(best))
+
+
+def line_box(observations: list[dict[str, Any]], line: list[dict[str, Any]], y: float, tall: float,
+             spot: Spot, line_height: float) -> list[float]:
+    """The box of a known line on which Vision did not find the spot. An observation of the line
+    with its words on both sides of the spot holds the spot. Otherwise the spot may lie in another
+    observation at that height, its word misread (a label at the start of a table row): every one
+    counts but those holding words of other lines."""
+    before, after = spot.sides
+    inside = [o for o in line if o["norms"] & before and o["norms"] & after]
+    if inside:
+        return union_box(inside)
+    elsewhere = {n for n, k in spot.once.items() if k != spot.line}
+    return union_box(line + [o for o in observations if abs(center_y(o) - y) <= 0.5 * line_height
+                             and o["bbox"][3] <= tall and not o["norms"] & elsewhere])
+
+
+def between(observations: list[dict[str, Any]], interest: set[str], first: list[tuple[str, dict[str, Any]]],
+            last: list[tuple[str, dict[str, Any]]], spot: Spot, height: int,
+            line_height: float) -> tuple[list[float] | None, float, tuple[float, float]]:
+    """Where a spot whose line Vision did not show lies: between the nearest anchors before and after
+    it (`first`, `last`), not around the middle of all of them, which a footnote of many words far
+    below can pull away.
+
+    A find of the tokens of interest counts only there (two line heights to spare), the longer one
+    first, so that a date the page has once outweighs the "1" of a page number. Without a find, the
+    range is the whole stretch between the anchors; a stamp, a signature or a picture keeps to the
+    anchor before it when the one after is far. A picture or a stamp between the spot and an anchor
+    widens the range by LARGE_REACH around that anchor: what follows it in the text may stand beside
+    it, as the depth marks to the right of a scan. With an anchor on one side only, the range reaches
+    two line heights past it for every line between it and the spot.
+    """
+    if first and last and spot.large and abs(center_y(last[0][1]) - center_y(first[0][1])) > 0.25 * height:
+        last = []  # the text jumps to another block: a stamp stands by the text before it
+    ys = [center_y(o) for _, o in first + last]
+    top, bottom = min(ys), max(ys)
+    if not (first and last):  # one side only: the spot may lie lines away
+        norm = (first or last)[0][0]
+        reach = 2 * line_height * (abs(spot.line - spot.once[norm]) + 1)
+        top, bottom = (top, min(height, bottom + reach)) if first else (max(0, top - reach), bottom)
+    if not spot.large:  # a stamp's own range grows by LARGE_REACH anyway
+        for norm, o in first + last:
+            low, high = sorted((spot.line, spot.once[norm]))
+            if any(low < n < high for n in spot.large_lines):
+                top = max(0, min(top, center_y(o) - LARGE_REACH * height))
+                bottom = min(height, max(bottom, center_y(o) + LARGE_REACH * height))
+    margin = 2 * line_height
+    hits = [o for o in observations if o["norms"] & interest and top - margin <= center_y(o) <= bottom + margin]
+    if not hits:
+        return None, (top + bottom) / 2, (top, bottom)
+    weight = lambda o: sum(len(n) for n in o["norms"] & interest)
+    best = min(hits, key=lambda o: (-weight(o), abs(center_y(o) - (top + bottom) / 2)))
     return best["bbox"], center_y(best), (center_y(best), center_y(best))
 
 

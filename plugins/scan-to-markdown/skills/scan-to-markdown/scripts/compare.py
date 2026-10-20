@@ -23,8 +23,10 @@ quick look.
 Crops show the spot. Where Vision shows its tokens (or, for printed text, its line), a row with the
 spot framed and a close-up; otherwise a band of the page with the spot inside, taller for stamps,
 signatures and pictures. Words of stamps and handwritten notes are never looked up in Vision's
-text, and only printed tokens the text has once anchor a line: the doctor's name printed under her
-stamp, or a "12" inside a certificate number, cannot pull a crop to another place.
+text, and only printed tokens the text has on one line anchor a line: the doctor's name printed
+under her stamp, or a "12" inside a certificate number, cannot pull a crop to another place. A spot
+whose line Vision does not show lies between the nearest such anchors before and after it, so that
+neither a footnote far below nor table headers repeated down the page can pull its crop away.
 
 Table cell borders are matched by their place in the line too: a border that opens a line only
 with one that opens a line, a border that closes it only with one that closes it. A row one reader
@@ -57,7 +59,7 @@ import argparse
 import difflib
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -65,6 +67,8 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # lets `python3 -I` find common.py
 from common import (
+    LARGE_REACH,
+    Spot,
     Token,
     alignment_keys,
     bracket_groups,
@@ -104,7 +108,6 @@ MAX_EDGE = 2000
 # nearby (the doctor's name under her stamp) must not be taken for them.
 UNSEEN_MARKS = ("от руки", "подпись", "печать", "изображение", "логотип", "штрихкод", "qr-код")
 LARGE_MARKS = UNSEEN_MARKS[1:]  # stamps, signatures and pictures reach beyond the line they are written on
-LARGE_REACH = 0.12  # how far such a mark may reach from that line, as a share of the page height
 
 
 class Text:
@@ -123,9 +126,13 @@ class Text:
                 self.marks.append((start, end, kind))
         self.token_marks = [next((k for s, e, k in self.marks if s <= t.start < e), None) for t in self.tokens]
         printed = [t for t, mark in zip(self.tokens, self.token_marks) if mark is None]
-        counts = Counter(t.norm for t in printed)
-        self.printed_norms = set(counts)
-        self.once = {t.norm: t.line for t in printed if counts[t.norm] == 1}  # printed once, with its line
+        lines_of: dict[str, set[int]] = defaultdict(set)
+        for t in printed:
+            lines_of[t.norm].add(t.line)
+        self.printed_norms = set(lines_of)
+        # Printed on one line only, maybe twice there ("77/77"), with that line.
+        self.once = {norm: min(lines) for norm, lines in lines_of.items() if len(lines) == 1}
+        self.large_lines = frozenset(self.line_of(start) for start, _, kind in self.marks if kind in LARGE_MARKS)
 
     def printed(self, i1: int, i2: int) -> list[Token]:
         """The tokens among tokens[i1:i2] that are printed text, not words of a stamp or a handwritten note."""
@@ -666,18 +673,23 @@ def place(a: Text, ocr: dict, height: int, interest: set[str], i1: int, i2: int,
     The box is where Vision shows the tokens of interest. Printed text without such tokens is boxed
     by its whole line; a spot with marks for what is not printed text (a stamp, a handwritten note,
     a picture) gets no box but the range it lies in, so that its crop is a band of the page with
-    the spot inside. The line comes from printed tokens that the text has once and Vision saw
-    once, never from words of such marks. Stamps, signatures and pictures reach beyond the line they
-    are written on: their range grows by LARGE_REACH of the page height each way.
+    the spot inside. The line comes from printed tokens that the text has on one line only and
+    Vision saw once, never from words of such marks; the nearest twelve such tokens on each side
+    anchor the estimate, however many repeated words (table headers) stand between. Stamps,
+    signatures and pictures reach beyond the line they are written on: their range grows by
+    LARGE_REACH of the page height each way.
     """
     line = a.line_of(start)
-    anchor = lambda k: distinctive(a.tokens[k]) and a.token_marks[k] is None
+    anchor = lambda k: distinctive(a.tokens[k]) and a.token_marks[k] is None and a.tokens[k].norm in a.once
     # Text only B has is printed where B saw it, not necessarily on A's line at the insertion point.
     same_line = [a.tokens[k].norm for k in range(len(a.tokens)) if a.tokens[k].line == line and not i1 <= k < i2 and anchor(k)] if i1 < i2 else []
     before = [a.tokens[k].norm for k in range(i1 - 1, -1, -1) if anchor(k)][:12]
     after = [a.tokens[k].norm for k in range(i2, len(a.tokens)) if anchor(k)][:12]
+    on_line = [k for k, t in enumerate(a.tokens) if t.line == line and t.kind in ("word", "num") and a.token_marks[k] is None]
+    sides = ({a.tokens[k].norm for k in on_line if k < i1}, {a.tokens[k].norm for k in on_line if k >= i2})
+    spot = Spot(line, a.once, a.large_lines, bool(marks & set(LARGE_MARKS)), sides)
     box, y, (top, bottom) = locate(ocr, interest, (before, after), (line + 0.5) / a.line_count, height, same_line,
-                                   whole_line=not marks, lines=(line, a.once))
+                                   whole_line=not marks, spot=spot)
     if box is None and marks & set(LARGE_MARKS):
         top, bottom = max(0, top - LARGE_REACH * height), min(height, bottom + LARGE_REACH * height)
     return box, y, (top, bottom)
